@@ -1,50 +1,56 @@
+/*
+ * Content script - Instagram Media Downloader v1
+ * Extracts media URLs from:
+ *   - SSR JSON blocks (application/json scripts)
+ *   - __entry__.js React hydration data
+ *   - DOM video/img elements
+ *   - OpenGraph/meta tags for single-image posts
+ */
+
 (() => {
   "use strict";
 
-  const PROCESSED = "data-tmd";
-  const WRAP_CLASS = "tmd-wrap";
-  const BTN_CLASS = "tmd-btn";
-  const VISIBLE_CLASS = "tmd-visible";
+  const PROCESSED = "data-imd";
+  const WRAP_CLASS = "imd-wrap";
+  const BTN_CLASS = "imd-btn";
+  const VISIBLE_CLASS = "imd-visible";
 
-  // CDN domains used by Threads/Instagram
-  const CDN_PATTERN = /cdninstagram\.com|fbcdn\.net/;
+  // Instagram CDN domains
+  const CDN_PATTERN = /cdninstagram\.com|fbcdn\.net|scontent\.instagram\.com/i;
 
   let lastUrl = location.href;
   let scanTimer = null;
   let isNavigating = false;
 
-  // ── DEBUG: visible marker ──
+  // ── DEBUG bar ──
   const dbg = document.createElement("div");
-  dbg.id = "tmd-debug";
+  dbg.id = "imd-debug";
   Object.assign(dbg.style, {
     position: "fixed", top: "0", left: "0", zIndex: "999999",
-    background: "#6C63FF", color: "#fff", padding: "6px 12px",
+    background: "#E1306C", color: "#fff", padding: "6px 12px",
     fontSize: "12px", fontFamily: "monospace", pointerEvents: "none"
   });
   (document.body || document.documentElement).appendChild(dbg);
-  function setDebug(msg) { dbg.textContent = `[TMD] ${msg}`; }
+  function setDebug(msg) { dbg.textContent = `[IMD] ${msg}`; }
   setDebug("loading…");
 
   init();
 
   function init() {
     setDebug("init");
-    extractVideoUrlsFromScripts();
+    extractMediaFromPage();
     scheduleScan();
 
-    // MutationObserver: DOM structure changes (covers React/Virtual DOM re-renders)
+    // MutationObserver: React/Virtual DOM re-renders
     const obs = new MutationObserver(() => {
-      if (location.href !== lastUrl) {
-        onNavigate();
-      }
+      if (location.href !== lastUrl) onNavigate();
       scheduleScan();
     });
     obs.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true
+      childList: true, subtree: true
     });
 
-    // History API: SPA navigation (pushState / replaceState)
+    // History API: SPA navigation
     const origPushState = history.pushState;
     const origReplaceState = history.replaceState;
     history.pushState = function (...args) {
@@ -58,7 +64,6 @@
       return result;
     };
 
-    // popstate: back/forward navigation
     window.addEventListener("popstate", () => {
       if (location.href !== lastUrl) onNavigate();
     });
@@ -68,33 +73,62 @@
     if (isNavigating) return;
     isNavigating = true;
     lastUrl = location.href;
-
-    // Cancel any pending scan so cleanup + fresh scan run cleanly
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
-
     cleanup();
-
-    // Wait for React to finish rendering before extracting/scanning
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        extractVideoUrlsFromScripts();
+        extractMediaFromPage();
         scheduleScan();
         isNavigating = false;
       });
     });
   }
 
-  // ── SSR JSON parsing (video_versions / image_versions2) ──
-  // Extracts URLs + thumbnail + viewport position → sent to popup for ordered display
-  function extractVideoUrlsFromScripts() {
+  // ── Unified media extraction ──
+  // Instagram page data lives in <script type="application/json" data-sjs> or similar
+  function extractMediaFromPage() {
     const media = []; // { url, type, thumb, y }
+
+    // 1. Scan ALL JSON scripts on the page
     for (const script of document.querySelectorAll('script[type="application/json"]')) {
       try {
-        findMediaUrls(JSON.parse(script.textContent), media, 0);
+        digMedia(JSON.parse(script.textContent), media, 0);
       } catch { /* skip */ }
     }
+
+    // 2. Look for __entry__.js data (older Instagram structure)
+    for (const script of document.querySelectorAll('script')) {
+      const src = script.src || "";
+      const text = script.textContent || "";
+      if (src.includes("__entry") || text.includes('"video_versions"') || text.includes('"image_versions2"')) {
+        try {
+          // Try to find JSON objects within the script
+          const matches = text.matchAll(/"(video_versions|image_versions2|carousel_media)":\s*\{/g);
+          for (const m of matches) {
+            // Extract a reasonable JSON substring around the match
+            const start = Math.max(0, m.index - 10);
+            const chunk = text.slice(start, start + 50000);
+            try {
+              digMedia(JSON.parse(chunk), media, 0);
+            } catch {
+              // Try parsing the whole script text as JSON fragments
+              const fragments = text.matchAll(/\{[^{}]*"(video_versions|image_versions2|carousel_media)"[^{}]*\{[^{}]{10,}\}/g);
+              for (const f of fragments) {
+                try { digMedia(JSON.parse(f[0]), media, 0); } catch { }
+              }
+            }
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    // 3. OpenGraph / meta tags (for single-image posts with og:image)
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content;
+    if (ogImage && CDN_PATTERN.test(ogImage)) {
+      media.push({ url: ogImage, type: "image", thumb: ogImage, y: media.length });
+    }
+
     if (media.length) {
-      // Sort by viewport position (top to bottom)
       media.sort((a, b) => a.y - b.y);
       const urls = media.map((m) => m.url);
       const thumbnails = {};
@@ -103,83 +137,140 @@
     }
   }
 
-  function findMediaUrls(obj, out, depth) {
-    if (depth > 20 || !obj || typeof obj !== "object") return;
-    // video
+  // ── Recursive JSON digger ──
+  function digMedia(obj, out, depth) {
+    if (depth > 25 || !obj || typeof obj !== "object") return;
+
+    // Video: video_versions array (highest quality)
     if (Array.isArray(obj.video_versions)) {
-      for (const v of obj.video_versions) {
-        if (v.url) out.push({ url: v.url, type: "video", thumb: v.thumbnail_url || null, y: out.length });
+      // video_versions is ordered by quality; last item is typically best
+      const best = obj.video_versions[obj.video_versions.length - 1];
+      if (best?.url) {
+        out.push({
+          url: best.url,
+          type: "video",
+          thumb: best.thumbnail_url || best.thumb || null,
+          y: out.length
+        });
       }
       return;
     }
-    if (typeof obj.video_url === "string") {
+
+    // Single video_url field
+    if (typeof obj.video_url === "string" && obj.video_url) {
       out.push({ url: obj.video_url, type: "video", thumb: null, y: out.length });
+      return;
     }
-    // image — collect all candidates, use highest quality
+
+    // Video dash (adaptive streaming manifest)
+    if (typeof obj.video_dash_manifest === "string" && obj.video_dash_manifest) {
+      try {
+        const manifest = JSON.parse(obj.video_dash_manifest);
+        const reps = manifest?.Representation || [];
+        const mp4s = reps.filter((r) => r.BaseURL?.includes(".mp4"));
+        if (mp4s.length) {
+          const best = mp4s[mp4s.length - 1];
+          if (best.BaseURL) {
+            // BaseURL in DASH manifest is often relative
+            const base = obj.video_url || location.href;
+            const url = best.BaseURL.startsWith("http") ? best.BaseURL : new URL(best.BaseURL, base).href;
+            out.push({ url, type: "video", thumb: null, y: out.length });
+          }
+        }
+      } catch { /* skip */ }
+    }
+
+    // Image: image_versions2 candidates (carousel posts, feed images)
     if (obj.image_versions2?.candidates) {
       const cands = obj.image_versions2.candidates;
       if (cands.length) {
+        // Last candidate is highest resolution
         const best = cands[cands.length - 1] || cands[0];
-        if (best.url) {
+        if (best?.url) {
           out.push({ url: best.url, type: "image", thumb: best.url, y: out.length });
         }
       }
       return;
     }
-    // Carousel: nested media array
-    if (obj.carousel_media) {
-      for (const m of obj.carousel_media) findMediaUrls(m, out, depth + 1);
+
+    // Legacy: image_versions (Instagram used this in older versions)
+    if (obj.image_versions?.candidates) {
+      const cands = obj.image_versions.candidates;
+      if (cands.length) {
+        const best = cands[cands.length - 1] || cands[0];
+        if (best?.url) {
+          out.push({ url: best.url, type: "image", thumb: best.url, y: out.length });
+        }
+      }
       return;
     }
-    for (const val of (Array.isArray(obj) ? obj : Object.values(obj))) {
-      findMediaUrls(val, out, depth + 1);
+
+    // Carousel / album: nested media array
+    if (Array.isArray(obj.carousel_media)) {
+      for (const m of obj.carousel_media) digMedia(m, out, depth + 1);
+      return;
+    }
+
+    // Story media
+    if (Array.isArray(obj.reel_media) || Array.isArray(obj.stories)) {
+      const storyArr = obj.reel_media || obj.stories;
+      for (const m of storyArr) digMedia(m, out, depth + 1);
+      return;
+    }
+
+    // Thread/conversation media (Instagram DMs)
+    if (obj.threads?.["0"]?.items) {
+      for (const item of obj.threads["0"].items) digMedia(item, out, depth + 1);
+      return;
+    }
+
+    // Recurse
+    if (Array.isArray(obj)) {
+      for (const v of obj) digMedia(v, out, depth + 1);
+    } else {
+      for (const k of Object.keys(obj)) digMedia(obj[k], out, depth + 1);
     }
   }
 
-  // ── DOM scan: attach buttons on images & videos ──
+  // ── DOM scan: attach buttons ──
   function scheduleScan() {
-    if (scanTimer) {
-      // Reschedule: new content may have arrived, push the timer out
-      clearTimeout(scanTimer);
-    }
+    if (scanTimer) { clearTimeout(scanTimer); }
     scanTimer = setTimeout(() => {
       scanTimer = null;
       scan();
-    }, 800);
+    }, 1000);
   }
 
   function scan() {
     setDebug(`scan v:${document.querySelectorAll("video").length} i:${document.querySelectorAll("img").length}`);
-    // Videos — button goes on the OUTSIDE of the video player (avoids controls overlap)
+
+    // Videos
     for (const video of document.querySelectorAll("video")) {
       if (video.hasAttribute(PROCESSED)) continue;
       video.setAttribute(PROCESSED, "video");
-      const container = findContainer(video, true);
-      if (container) attachOverlay(container, video, "video");
+      if (getComputedStyle(video).position === "static") {
+        video.style.position = "relative";
+      }
+      attachOverlay(video, video, "video");
     }
 
-    // Images – only large CDN images (skip avatars, icons)
+    // Images — large CDN images only
     for (const img of document.querySelectorAll("img")) {
       if (img.hasAttribute(PROCESSED)) continue;
       const src = img.src || img.currentSrc || "";
       if (!src || !CDN_PATTERN.test(src)) continue;
-      // Skip small images (profile pics, icons)
+      if (src.includes("/t51.2885-19/")) continue; // profile pic
+      if (src.includes("s150x150")) continue;
       const rect = img.getBoundingClientRect();
       if (rect.width < 150 || rect.height < 150) continue;
-      // Skip profile pictures path
-      if (src.includes("/t51.2885-19/")) continue;
 
       img.setAttribute(PROCESSED, "image");
-      const container = findContainer(img, false);
+      const container = findContainer(img);
       if (container) attachOverlay(container, img, "image");
     }
   }
 
-  function findContainer(el, isVideo) {
-    // For videos: always use the video element itself as container
-    // (CSS will position the button at top-right OUTSIDE the video content area)
-    if (isVideo) return el;
-    // For images: standard traversal
+  function findContainer(el) {
     let node = el.parentElement;
     for (let i = 0; i < 8 && node; i++) {
       const r = node.getBoundingClientRect();
@@ -189,23 +280,16 @@
     return el.parentElement;
   }
 
-  // ── Overlay button with JS-based hover ──
+  // ── Overlay button ──
   function attachOverlay(container, mediaEl, mediaType) {
     const isVideo = mediaType === "video";
 
-    // For videos: make the video element positionable (it IS the container)
-    if (isVideo) {
-      if (getComputedStyle(mediaEl).position === "static") {
-        mediaEl.style.position = "relative";
-      }
-    } else {
-      if (getComputedStyle(container).position === "static") {
-        container.style.position = "relative";
-      }
+    if (getComputedStyle(container).position === "static") {
+      container.style.position = "relative";
     }
 
     const wrap = document.createElement("div");
-    wrap.className = WRAP_CLASS + (isVideo ? " tmd-video" : "");
+    wrap.className = WRAP_CLASS + (isVideo ? " imd-video" : "");
 
     const label = isVideo ? "Video" : "Photo";
     const icon = isVideo ? ICON_VIDEO_DL : ICON_IMG_DL;
@@ -229,7 +313,6 @@
     wrap.appendChild(btn);
     container.appendChild(wrap);
 
-    // JS-based hover: listen on both the media element and the container
     const show = () => wrap.classList.add(VISIBLE_CLASS);
     const hide = () => {
       setTimeout(() => {
@@ -238,13 +321,12 @@
         }
       }, 200);
     };
-
     mediaEl.addEventListener("mouseenter", show);
     mediaEl.addEventListener("mouseleave", hide);
     wrap.addEventListener("mouseenter", show);
     wrap.addEventListener("mouseleave", hide);
 
-    // Also watch for src changes on video — capture poster thumbnail too
+    // Video: capture src changes + poster
     if (isVideo) {
       const srcObs = new MutationObserver(() => {
         const s = mediaEl.currentSrc || mediaEl.src || "";
@@ -255,7 +337,7 @@
           try { chrome.runtime.sendMessage(msg); } catch (_) {}
         }
       });
-      srcObs.observe(mediaEl, { attributes: true, attributeFilter: ["src"] });
+      srcObs.observe(mediaEl, { attributes: true, attributeFilter: ["src", "poster"] });
     }
   }
 
@@ -265,7 +347,6 @@
     btn.disabled = true;
     btn.innerHTML = `${ICON_SPINNER}<span>Saving...</span>`;
 
-    // Get highest resolution: try srcset first, then src
     let url = getBestImageUrl(img);
     if (!url) {
       showStatus(btn, prev, "No image found", 2000);
@@ -282,16 +363,15 @@
   }
 
   function getBestImageUrl(img) {
-    // Check srcset for highest resolution
     const srcset = img.getAttribute("srcset");
     if (srcset) {
-      const candidates = srcset.split(",").map((s) => {
+      const cands = srcset.split(",").map((s) => {
         const parts = s.trim().split(/\s+/);
         const w = parseInt(parts[1]) || 0;
         return { url: parts[0], w };
       });
-      candidates.sort((a, b) => b.w - a.w);
-      if (candidates[0]?.url) return candidates[0].url;
+      cands.sort((a, b) => b.w - a.w);
+      if (cands[0]?.url) return cands[0].url;
     }
     return img.src || img.currentSrc || "";
   }
@@ -305,29 +385,20 @@
     try {
       let url = "";
 
-      // Strategy 1 (primary): video element's src — specific to THIS video
+      // Strategy 1: video element's direct src
       url = getNonBlobSrc(video);
 
-      // Strategy 2: look in parent article/post data for direct URL
-      if (!url) {
-        url = findVideoUrlInPost(video);
-      }
+      // Strategy 2: look in nearby JSON scripts
+      if (!url) url = findVideoUrlFromScriptsNear(video);
 
-      // Strategy 3: from SSR JSON scripts near this video
-      if (!url) {
-        url = findVideoUrlFromScriptsNear(video);
-      }
-
-      // Strategy 4: network-captured CDN URLs — fall back only if no direct URL found
+      // Strategy 3: network-captured URLs
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
-        const capturedUrls = captured?.urls || [];
-        if (capturedUrls.length) {
-          url = capturedUrls[capturedUrls.length - 1];
-        }
+        const urls = captured?.urls || [];
+        if (urls.length) url = urls[urls.length - 1];
       }
 
-      // Strategy 5: embed endpoint fallback
+      // Strategy 4: embed fallback
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
@@ -348,52 +419,9 @@
         showStatus(btn, prev, "<span>Failed</span>", 2500);
       }
     } catch (err) {
-      console.error("[TMD]", err);
+      console.error("[IMD]", err);
       showStatus(btn, prev, "<span>Error</span>", 2000);
     }
-  }
-
-  // ── Find video URL from parent article/post element ──
-  function findVideoUrlInPost(video) {
-    // Walk up from the video to find a post/article container
-    let node = video;
-    for (let i = 0; i < 10 && node; i++) {
-      const url = node.dataset?.videoUrl || node.dataset?.video_url;
-      if (url && !url.startsWith("blob:") && (url.includes(".mp4") || url.includes("/v/"))) {
-        return url;
-      }
-      node = node.parentElement;
-    }
-    // Try: find adjacent JSON script in parent tree
-    return "";
-  }
-
-  // ── Find video URL from SSR JSON near the video element ──
-  function findVideoUrlFromScriptsNear(video) {
-    // Find the post/article container
-    let postNode = video;
-    for (let i = 0; i < 10 && postNode; i++) {
-      if (postNode.tagName === "ARTICLE" || postNode.tagName === "SECTION" ||
-          (postNode.id && /post|thread|item|entry/i.test(postNode.id))) {
-        break;
-      }
-      postNode = postNode.parentElement;
-    }
-    if (!postNode) return "";
-
-    // Look for JSON scripts inside or near this post
-    const scripts = postNode.querySelectorAll ? postNode.querySelectorAll('script[type="application/json"]') : [];
-    for (const script of scripts) {
-      try {
-        const urls = [];
-        findMediaUrls(JSON.parse(script.textContent), urls, 0);
-        // Return first video URL found in this post's scripts
-        for (const item of urls) {
-          if (item.type === "video" && item.url) return item.url;
-        }
-      } catch {}
-    }
-    return "";
   }
 
   function getNonBlobSrc(video) {
@@ -407,12 +435,44 @@
     return "";
   }
 
+  function findVideoUrlFromScriptsNear(video) {
+    let postNode = video;
+    for (let i = 0; i < 10 && postNode; i++) {
+      if (postNode.tagName === "ARTICLE" || postNode.tagName === "SECTION" ||
+          postNode.tagName === "MAIN" ||
+          (postNode.id && /post|article|entry|item|media/i.test(postNode.id))) {
+        break;
+      }
+      postNode = postNode.parentElement;
+    }
+    if (!postNode) return "";
+
+    const scripts = postNode.querySelectorAll ? postNode.querySelectorAll('script[type="application/json"]') : [];
+    for (const script of scripts) {
+      try {
+        const urls = [];
+        digMedia(JSON.parse(script.textContent), urls, 0);
+        for (const item of urls) {
+          if (item.type === "video" && item.url) return item.url;
+        }
+      } catch { /* skip */ }
+    }
+    return "";
+  }
+
   // ── Helpers ──
   function buildFilename(ext) {
     const parts = location.pathname.split("/").filter(Boolean);
-    const postIdx = parts.indexOf("post");
-    const postId = (postIdx !== -1 && parts[postIdx + 1]) ? parts[postIdx + 1] : "threads";
-    return `threads/${postId}_${Date.now()}.${ext}`;
+    // Instagram URL patterns: /p/POST_ID/, /reel/REEL_ID/, /tv/TV_ID/, /reels/REELS_ID/
+    const postIdx = Math.max(
+      parts.indexOf("p"),
+      parts.indexOf("reel"),
+      parts.indexOf("tv"),
+      parts.indexOf("reels"),
+      parts.indexOf("stories")
+    );
+    const postId = postIdx !== -1 && parts[postIdx + 1] ? parts[postIdx + 1] : "post";
+    return `instagram/${postId}_${Date.now()}.${ext}`;
   }
 
   function showStatus(btn, restoreHtml, html, delay) {
@@ -429,11 +489,8 @@
   }
 
   function cleanup() {
-    // Remove all overlay wrappers
     document.querySelectorAll(`.${WRAP_CLASS}`).forEach((el) => el.remove());
-    // Remove processed markers so elements are re-scanned on new page
     document.querySelectorAll(`[${PROCESSED}]`).forEach((el) => el.removeAttribute(PROCESSED));
-    // Reset per-page timer state
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
   }
 
@@ -441,5 +498,5 @@
   const ICON_VIDEO_DL = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
   const ICON_IMG_DL = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`;
   const ICON_CHECK = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
-  const ICON_SPINNER = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="tmd-spin"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>`;
+  const ICON_SPINNER = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="imd-spin"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>`;
 })();

@@ -1,13 +1,13 @@
 /*
- * Background service worker - Threads Media Downloader v3
- * - Intercepts CDN network requests (video + image)
- * - Embed endpoint fallback for videos
- * - Downloads media via chrome.downloads
+ * Background service worker - Instagram Media Downloader v1
+ * - Captures CDN URLs from webRequest
+ * - declarativeNetRequest: auto-injects Referer header for CDN requests
+ * - Downloads via chrome.downloads
  */
 
 const capturedMedia = new Map(); // tabId -> { videos: Map<url,ts>, images: Map<url,ts>, thumbnails: {} }
 
-// ── Network request interception (webRequest) ──
+// ── Network request interception ──
 try {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
@@ -25,15 +25,17 @@ try {
     }
   );
 } catch (e) {
-  console.warn("[TMD] webRequest not available:", e.message);
+  console.warn("[IMD] webRequest not available:", e.message);
 }
 
 function classifyUrl(url) {
-  // Skip tiny resources and profile pics
-  if (url.includes("/t51.2885-19/")) return null; // profile pic path
-  if (url.includes("/v/t16/") || url.includes(".mp4")) return "videos";
-  // Large images from posts (not story stickers, not s150x150)
-  if ((url.includes(".jpg") || url.includes(".webp")) && !url.includes("s150x150")) {
+  // Skip profile pics
+  if (url.includes("/t51.2885-19/")) return null;
+  // Video: scontent + .mp4 pattern (Instagram video CDN URLs)
+  if (url.includes(".mp4") || url.includes("/v/")) return "videos";
+  // Large images (skip s150x150, stickers, story elements)
+  if ((url.includes(".jpg") || url.includes(".webp")) &&
+      !url.includes("s150x150") && !url.includes("/sticker/")) {
     return "images";
   }
   return null;
@@ -50,7 +52,7 @@ function updateBadge(tabId) {
   const tab = capturedMedia.get(tabId);
   const count = tab ? tab.videos.size + tab.images.size : 0;
   chrome.action.setBadgeText({ text: count > 0 ? String(count) : "", tabId });
-  chrome.action.setBadgeBackgroundColor({ color: "#6C63FF", tabId });
+  chrome.action.setBadgeBackgroundColor({ color: "#E1306C", tabId });
 }
 
 // ── Message router ──
@@ -59,7 +61,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const fn = handlers[msg?.type];
     if (fn) { fn(msg, sender, sendResponse); return true; }
   } catch (e) {
-    console.error("[TMD] Handler error:", e);
+    console.error("[IMD] Handler error:", e);
     sendResponse({ ok: false, error: e.message });
   }
   return false;
@@ -94,7 +96,6 @@ const handlers = {
     }
   },
 
-  // Alias for backward compat with popup
   async DOWNLOAD_VIDEO(msg, _s, respond) {
     try {
       await download(msg.url, msg.filename);
@@ -109,13 +110,12 @@ const handlers = {
     if (tabId && msg.urls?.length) {
       const tab = getTab(tabId);
       for (const url of msg.urls) {
-        if (url.includes(".mp4") || url.includes("/v/t16/")) {
+        if (url.includes(".mp4") || url.includes("/v/")) {
           tab.videos.set(url, Date.now());
         } else {
           tab.images.set(url, Date.now());
         }
       }
-      // Merge thumbnails if provided
       if (msg.thumbnails && tabId) {
         if (!tab.thumbnails) tab.thumbnails = {};
         Object.assign(tab.thumbnails, msg.thumbnails);
@@ -126,23 +126,33 @@ const handlers = {
   }
 };
 
-// ── Download ──
-function download(url, filename) {
+// ── Download: fetch -> blob -> downloads API (adds Referer header) ──
+async function download(url, filename) {
+  if (!url || url.startsWith("blob:")) {
+    throw new Error("Cannot download blob: URL");
+  }
+  // Instagram CDN requires Referer: https://www.instagram.com/
+  const resp = await fetch(url, {
+    headers: { "Referer": "https://www.instagram.com/" }
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  const blobUrl = URL.createObjectURL(blob);
   return new Promise((resolve, reject) => {
-    if (!url || url.startsWith("blob:")) {
-      reject(new Error("Cannot download blob: URL"));
-      return;
-    }
     chrome.downloads.download(
       {
-        url,
-        filename: sanitize(filename || `threads/${Date.now()}.mp4`),
+        url: blobUrl,
+        filename: sanitize(filename || `instagram/${Date.now()}.mp4`),
         saveAs: false,
         conflictAction: "uniquify"
       },
-      (id) => chrome.runtime.lastError
-        ? reject(new Error(chrome.runtime.lastError.message))
-        : resolve(id)
+      (id) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(id);
+        }
+      }
     );
   });
 }
@@ -180,5 +190,5 @@ try {
     if (info.status === "loading") { capturedMedia.delete(tabId); updateBadge(tabId); }
   });
 } catch (e) {
-  console.warn("[TMD] tabs listeners error:", e.message);
+  console.warn("[IMD] tabs listeners error:", e.message);
 }
