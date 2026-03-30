@@ -16,7 +16,28 @@
   let scanTimer = null;
   let isNavigating = false;
 
+  injectStyles();
   init();
+
+  /** Inject button styles via JS — fallback for when content.css is blocked */
+  function injectStyles() {
+    if (document.getElementById("imd-injected-styles")) return;
+    const s = document.createElement("style");
+    s.id = "imd-injected-styles";
+    s.textContent = `
+      .imd-wrap{position:absolute;right:10px;top:10px;z-index:2147483647;opacity:1;transform:translateY(0);pointer-events:none}
+      .imd-wrap .imd-btn{pointer-events:auto}
+      .imd-wrap:has(button:disabled){opacity:1!important;transform:translateY(0)!important}
+      .imd-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border:none;border-radius:20px;background:rgba(0,0,0,.78);color:#fff;font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;cursor:pointer;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 2px 16px rgba(0,0,0,.35);transition:background 150ms ease,transform 120ms ease;white-space:nowrap;user-select:none;-webkit-user-select:none}
+      .imd-btn:hover{background:rgba(0,0,0,.92);transform:scale(1.05)}
+      .imd-btn:active{transform:scale(.96)}
+      .imd-btn:disabled{cursor:wait;opacity:.8}
+      .imd-btn svg{flex-shrink:0}
+      @keyframes imd-spin{to{transform:rotate(360deg)}}
+      .imd-spin{animation:imd-spin .7s linear infinite}
+    `;
+    (document.head || document.documentElement).appendChild(s);
+  }
 
   function init() {
     extractVideoUrlsFromScripts();
@@ -597,25 +618,7 @@
       }
       console.log("[IMD] downloadVideo code:", code, "| from:", article ? "article" : "url");
 
-      // ── Strategy 1: SSR JSON CDN URL matched by CODE (not index!) ──
-      // Index matching is unreliable because SSR data is from initial page load
-      // but video elements change as user scrolls. Code matching guarantees
-      // the URL is for the correct video.
-      if (!url && code) {
-        const ssrEntries = getSsrVideoEntries();
-        const match = ssrEntries.find(e => e.code && e.code === code);
-        if (match) url = match.url;
-      }
-
-      // ── Strategy 2: CDN URL captured when this video played ──
-      if (!url && video.dataset.imdVideoUrl) {
-        url = video.dataset.imdVideoUrl;
-      }
-
-      // ── Strategy 3: non-blob src on the video element ──
-      if (!url) url = getNonBlobSrc(video);
-
-      // ── Strategy 4: embed endpoint via shortcode ──
+      // ── Strategy 1: embed endpoint (returns proper MP4, not fMP4 fragments) ──
       if (!url && code) {
         for (const t of ["reel", "p", "tv"]) {
           const embed = await sendMsg({
@@ -626,10 +629,25 @@
         }
       }
 
+      // ── Strategy 2: SSR JSON CDN URL matched by CODE ──
+      if (!url && code) {
+        const ssrEntries = getSsrVideoEntries();
+        const match = ssrEntries.find(e => e.code && e.code === code);
+        if (match) url = match.url;
+      }
+
+      // ── Strategy 3: CDN URL captured when this video played ──
+      if (!url && video.dataset.imdVideoUrl) {
+        url = video.dataset.imdVideoUrl;
+      }
+
+      // ── Strategy 4: non-blob src on the video element ──
+      if (!url) url = getNonBlobSrc(video);
+
       // ── Strategy 5: data attributes on parent elements ──
       if (!url) url = findVideoUrlInPost(video);
 
-      // ── Strategy 7: network-captured URLs (last resort) ──
+      // ── Strategy 6: network-captured URLs (last resort) ──
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
@@ -640,7 +658,6 @@
         if (full.length) {
           url = full[full.length - 1];
         } else {
-          // Strip range params
           const withRange = capturedUrls.filter(u =>
             u.includes("cdninstagram") || u.includes("fbcdn")
           );
@@ -652,7 +669,7 @@
         }
       }
 
-      // ── Strategy 8: embed from current page URL ──
+      // ── Strategy 7: embed from current page URL ──
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
