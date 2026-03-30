@@ -107,6 +107,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     </div>`;
 
   content.innerHTML = html;
+  setupThumbFallbacks(content);
 
   const allMedia = [
     ...videos.map((u) => ({ url: u, ext: "mp4", thumb: allThumbnails[u] || null })),
@@ -151,18 +152,20 @@ function mediaItem(url, idx, type, label, thumbUrl) {
   const typeClass = type === "video" ? "type-video" : "type-photo";
   const typeLabel = type === "video" ? "MP4" : "JPG";
 
+  // CSP-safe: no inline event handlers (onerror etc.)
+  const videoIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+  const imageIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`;
+  const placeholder = `<div class="thumb-placeholder">${type === "video" ? videoIcon : imageIcon}</div>`;
+
   let thumbHtml;
   if (thumbUrl) {
     if (type === "video") {
-      thumbHtml = `<video muted playsinline src="${esc(thumbUrl)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"></video><div class="thumb-placeholder" style="display:none"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>`;
+      thumbHtml = `<video muted playsinline src="${esc(thumbUrl)}" data-fallback="true"></video>${placeholder}`;
     } else {
-      thumbHtml = `<img src="${esc(thumbUrl)}" alt="${label}" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2252%22 height=%2252%22><rect fill=%22%23f0f0f0%22 width=%2252%22 height=%2252%22 rx=%228%22/></svg>'">`;
+      thumbHtml = `<img src="${esc(thumbUrl)}" alt="${label}" loading="lazy" data-fallback="true">${placeholder}`;
     }
   } else {
-    const icon = type === "video"
-      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`
-      : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`;
-    thumbHtml = `<div class="thumb-placeholder">${icon}</div>`;
+    thumbHtml = placeholder;
   }
 
   return `
@@ -306,4 +309,30 @@ function extractPostId(url) {
 
 function esc(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// CSP-safe: handle thumbnail load errors via JS instead of inline onerror
+function setupThumbFallbacks(container) {
+  for (const el of container.querySelectorAll("[data-fallback]")) {
+    el.addEventListener("error", () => {
+      el.style.display = "none";
+      const next = el.nextElementSibling;
+      if (next && next.classList.contains("thumb-placeholder")) {
+        next.style.display = "flex";
+      }
+    });
+    // Hide placeholder when media loads successfully
+    el.addEventListener("load", () => {
+      const next = el.nextElementSibling;
+      if (next && next.classList.contains("thumb-placeholder")) {
+        next.style.display = "none";
+      }
+    });
+    el.addEventListener("loadeddata", () => {
+      const next = el.nextElementSibling;
+      if (next && next.classList.contains("thumb-placeholder")) {
+        next.style.display = "none";
+      }
+    });
+  }
 }
