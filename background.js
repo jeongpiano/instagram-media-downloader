@@ -179,19 +179,22 @@ async function fetchEmbed(postUrl) {
   while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
   const re2 = /<video[^>]+src="([^"]+)"/g;
   while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
-  // JSON video_url field (modern Instagram embed pages store URL in inline script JSON)
-  const re3 = /"video_url"\s*:\s*"(https:[^"]+)"/g;
+  // JSON video_url field — Instagram embed HTML contains doubly-escaped JS JSON:
+  //   \"video_url\":\"https://...mp4?\u0026token...\"
+  // The URL contains \u0026 (escaped &), so we must allow \+non-quote inside the capture.
+  // Pattern: allow [^"\\] (normal chars) OR \\[^"] (backslash + non-quote) inside the value.
+  const re3 = /\\"video_url\\":\\"(https:(?:[^"\\]|\\[^"])*)\\"/ g;
   while ((m = re3.exec(html))) {
     const u = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
     if (!urls.includes(u)) urls.push(u);
   }
-  // Direct CDN .mp4 URLs as last resort
+  // Direct CDN .mp4 URLs as last resort (catches any format)
   const re4 = /https:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*/g;
   while ((m = re4.exec(html))) {
-    const u = decHtml(m[0]);
-    if (!urls.includes(u)) urls.push(u);
+    const u = decHtml(m[0]).split("\\")[0]; // strip any trailing escaped chars
+    if (u.startsWith("https://") && !urls.includes(u)) urls.push(u);
   }
-  return urls;
+  return urls.filter(u => u.startsWith("https://") && (u.includes("cdninstagram") || u.includes("fbcdn")));
 }
 
 function decHtml(s) {
