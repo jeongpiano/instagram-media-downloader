@@ -329,6 +329,14 @@ function scanPage() {
     }
   }
 
+  // ── Step 4: Add ALL SSR JSON images (captures full carousel, not just 3 DOM-rendered slides) ──
+  for (const item of ssrImages) {
+    if (!images.includes(item.url)) {
+      images.push(item.url);
+      if (!thumbnails[item.url]) thumbnails[item.url] = item.url;
+    }
+  }
+
   return { videos: [...new Set(videos)], images: [...new Set(images)], thumbnails };
 }
 

@@ -382,41 +382,43 @@
     return "";
   }
 
-  // ── Find video URL from SSR JSON scripts ──
+  // ── Find video URL from SSR JSON scripts, matched to the specific video element ──
   function findVideoUrlFromScriptsNear(video) {
-    // First: try scripts near the video (within article/section)
-    let postNode = video;
-    for (let i = 0; i < 10 && postNode; i++) {
-      if (postNode.tagName === "ARTICLE" || postNode.tagName === "SECTION" ||
-          (postNode.id && /post|thread|item|entry/i.test(postNode.id))) {
-        break;
-      }
-      postNode = postNode.parentElement;
-    }
-    if (postNode) {
-      const scripts = postNode.querySelectorAll ? postNode.querySelectorAll('script[type="application/json"]') : [];
-      for (const script of scripts) {
-        try {
-          const urls = [];
-          findMediaUrls(JSON.parse(script.textContent), urls, 0);
-          for (const item of urls) {
-            if (item.type === "video" && item.url) return item.url;
-          }
-        } catch {}
-      }
-    }
-
-    // Fallback: search ALL script tags on the page (SSR JSON is often in <head>, not in <article>)
+    // Collect ALL unique video URLs from ALL SSR JSON scripts on the page
+    const allSsrVideoUrls = [];
     for (const script of document.querySelectorAll('script[type="application/json"]')) {
       try {
-        const urls = [];
-        findMediaUrls(JSON.parse(script.textContent), urls, 0);
-        for (const item of urls) {
-          if (item.type === "video" && item.url) return item.url;
+        const items = [];
+        findMediaUrls(JSON.parse(script.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.url && !allSsrVideoUrls.includes(item.url)) {
+            allSsrVideoUrls.push(item.url);
+          }
         }
       } catch {}
     }
-    return "";
+
+    if (!allSsrVideoUrls.length) return "";
+    if (allSsrVideoUrls.length === 1) return allSsrVideoUrls[0];
+
+    // Match by article position (most reliable for feeds with multiple video posts)
+    const allArticles = Array.from(document.querySelectorAll("article"));
+    const closestArticle = video.closest("article");
+    if (closestArticle && allArticles.length > 0) {
+      const articleIdx = allArticles.indexOf(closestArticle);
+      if (articleIdx >= 0 && articleIdx < allSsrVideoUrls.length) {
+        return allSsrVideoUrls[articleIdx];
+      }
+    }
+
+    // Fallback: match by DOM video element index
+    const allVideos = Array.from(document.querySelectorAll("video"));
+    const videoIdx = allVideos.indexOf(video);
+    if (videoIdx >= 0 && videoIdx < allSsrVideoUrls.length) {
+      return allSsrVideoUrls[videoIdx];
+    }
+
+    return allSsrVideoUrls[0];
   }
 
   function getNonBlobSrc(video) {

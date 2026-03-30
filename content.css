@@ -4,9 +4,8 @@
   right: 10px;
   bottom: 10px;
   z-index: 2147483647;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 180ms ease, transform 180ms ease;
+  opacity: 1;
+  transform: translateY(0);
   pointer-events: none;
 }
 
@@ -19,18 +18,7 @@
   transform: translateY(0);
 }
 
-/* Fully visible on hover (JS-based or CSS parent hover) */
-.imd-wrap:hover,
-.imd-wrap.imd-visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* CSS-based parent hover — works even when Instagram overlays block JS events */
-.imd-hover-parent:hover > .imd-wrap {
-  opacity: 1;
-  transform: translateY(0);
-}
+/* Keep full opacity during download status */
 
 /* The BUTTON itself is always clickable */
 .imd-wrap .imd-btn {
