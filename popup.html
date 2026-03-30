@@ -20,7 +20,6 @@
     }
     .header img { width: 24px; height: 24px; }
     .header h1 { font-size: 15px; font-weight: 700; }
-    .header small { font-size: 11px; color: #999; margin-left: auto; }
     .status {
       padding: 16px;
       color: #666;
@@ -70,8 +69,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: linear-gradient(135deg, #ffe0e8 0%, #fce4ec 100%);
-      color: #E1306C;
+      background: linear-gradient(135deg, #fce4ec 0%, #ffecd2 100%);
+      color: #999;
     }
     .media-type {
       display: inline-block;
@@ -81,7 +80,7 @@
       font-weight: 700;
       text-transform: uppercase;
     }
-    .type-video { background: #ffe0e8; color: #E1306C; }
+    .type-video { background: #fce4ec; color: #E1306C; }
     .type-photo { background: #e8f8e8; color: #27ae60; }
     .media-info { flex: 1; min-width: 0; }
     .media-url {
@@ -105,7 +104,7 @@
       cursor: pointer;
       transition: background 150ms;
     }
-    .dl-btn:hover { background: #c0285a; }
+    .dl-btn:hover { background: #c13584; }
     .dl-btn:disabled { background: #ccc; cursor: wait; }
     .dl-btn.done { background: #27ae60; }
     .dl-all-wrap {
@@ -123,7 +122,7 @@
       cursor: pointer;
       transition: background 150ms;
     }
-    .dl-all:hover { background: #c0285a; }
+    .dl-all:hover { background: #c13584; }
     .dl-all:disabled { background: #ccc; cursor: wait; }
     .scan-btn {
       display: block;
@@ -137,22 +136,12 @@
       cursor: pointer;
     }
     .scan-btn:hover { background: #f5f5f5; }
-    .page-type {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 8px;
-      font-size: 11px;
-      font-weight: 600;
-      background: #fff0f4;
-      color: #E1306C;
-      margin-left: 6px;
-    }
   </style>
 </head>
 <body>
   <div class="header">
     <img src="icons/icon48.png" alt="">
-    <h1>Instagram Downloader <small style="font-size:11px;font-weight:400;color:#999;">v4.2</small></h1>
+    <h1>Instagram Media Downloader</h1>
   </div>
   <div id="content">
     <div class="status" id="status">미디어 검색 중...</div>

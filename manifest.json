@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Instagram Media Downloader",
-  "version": "4.2.0",
-  "description": "Download photos, videos, Reels, and Stories from Instagram with hover buttons.",
+  "version": "3.0.0",
+  "description": "Download photos and videos from Instagram with one click.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

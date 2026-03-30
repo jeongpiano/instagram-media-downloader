@@ -1,14 +1,13 @@
 /*
- * Background service worker - Instagram Media Downloader v4
- * - Captures CDN URLs from webRequest
- * - Downloads via chrome.downloads (direct URL, no fetch→blob)
- * - Instagram GraphQL API fallback
- * - Embed page fallback
+ * Background service worker - Instagram Media Downloader v3
+ * - Intercepts CDN network requests (video + image)
+ * - Embed endpoint fallback for videos
+ * - Downloads media via chrome.downloads
  */
 
 const capturedMedia = new Map(); // tabId -> { videos: Map<url,ts>, images: Map<url,ts>, thumbnails: {} }
 
-// ── Network request interception ──
+// ── Network request interception (webRequest) ──
 try {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
@@ -21,11 +20,7 @@ try {
       updateBadge(details.tabId);
     },
     {
-      urls: [
-        "https://*.cdninstagram.com/*",
-        "https://*.fbcdn.net/*",
-        "https://*.instagram.com/*"
-      ],
+      urls: ["https://*.cdninstagram.com/*", "https://*.fbcdn.net/*"],
       types: ["media", "xmlhttprequest", "image", "other"]
     }
   );
@@ -34,10 +29,11 @@ try {
 }
 
 function classifyUrl(url) {
-  if (url.includes("/t51.2885-19/")) return null; // profile pic
-  if (url.includes(".mp4") || url.includes("/v/")) return "videos";
-  if ((url.includes(".jpg") || url.includes(".webp") || url.includes(".png")) &&
-      !url.includes("s150x150") && !url.includes("/sticker/") && !url.includes("/t15/") && !url.includes("/t32/")) {
+  // Skip tiny resources and profile pics
+  if (url.includes("/t51.2885-19/")) return null; // profile pic path
+  if (url.includes("/v/t16/") || url.includes(".mp4")) return "videos";
+  // Large images from posts (not story stickers, not s150x150)
+  if ((url.includes(".jpg") || url.includes(".webp")) && !url.includes("s150x150")) {
     return "images";
   }
   return null;
@@ -70,7 +66,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 const handlers = {
-
   GET_CAPTURED_URLS(msg, sender, respond) {
     const tabId = msg.tabId || sender.tab?.id;
     const tab = tabId ? capturedMedia.get(tabId) : null;
@@ -82,33 +77,25 @@ const handlers = {
     });
   },
 
-  async FETCH_GRAPHQL_MEDIA(msg, _sender, respond) {
+  async FETCH_EMBED_VIDEOS(msg, _s, respond) {
     try {
-      const result = await fetchGraphQLMedia(msg.postUrl);
-      respond(result);
+      respond({ ok: true, videoUrls: await fetchEmbed(msg.postUrl) });
     } catch (e) {
       respond({ ok: false, error: e.message });
     }
   },
 
-  async EXTRACT_HLS(msg, _sender, respond) {
+  async DOWNLOAD_MEDIA(msg, _s, respond) {
     try {
-      const mp4Url = await extractHLStoMP4(msg.manifestUrl);
-      respond({ ok: true, url: mp4Url });
+      await download(msg.url, msg.filename);
+      respond({ ok: true });
     } catch (e) {
       respond({ ok: false, error: e.message });
     }
   },
 
-  async FETCH_EMBED_VIDEOS(msg, _sender, respond) {
-    try {
-      respond({ ok: true, videoUrls: await fetchEmbedVideos(msg.postUrl) });
-    } catch (e) {
-      respond({ ok: false, error: e.message });
-    }
-  },
-
-  async DOWNLOAD_MEDIA(msg, _sender, respond) {
+  // Alias for backward compat with popup
+  async DOWNLOAD_VIDEO(msg, _s, respond) {
     try {
       await download(msg.url, msg.filename);
       respond({ ok: true });
@@ -122,12 +109,13 @@ const handlers = {
     if (tabId && msg.urls?.length) {
       const tab = getTab(tabId);
       for (const url of msg.urls) {
-        if (url.includes(".mp4") || url.includes("/v/") || url.includes(".m3u8")) {
+        if (url.includes(".mp4") || url.includes("/v/t16/")) {
           tab.videos.set(url, Date.now());
         } else {
           tab.images.set(url, Date.now());
         }
       }
+      // Merge thumbnails if provided
       if (msg.thumbnails && tabId) {
         if (!tab.thumbnails) tab.thumbnails = {};
         Object.assign(tab.thumbnails, msg.thumbnails);
@@ -138,174 +126,13 @@ const handlers = {
   }
 };
 
-// ── Instagram GraphQL API fallback ──
-async function fetchGraphQLMedia(postUrl) {
-  if (!postUrl) throw new Error("No URL");
-
-  const shortcode = extractShortcode(postUrl);
-  if (!shortcode) throw new Error("No shortcode found");
-
-  // FIX #5: Use working GraphQL endpoint (v1/media was deprecated)
-  const graphqlUrl = `https://www.instagram.com/graphql/query/?query_hash=b3055c01b4b222b8a47dc12b090e4e64&variables=${encodeURIComponent(JSON.stringify({ shortcode }))}`;
-
-  const resp = await fetch(graphqlUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "X-IG-App-ID": "936619743392459",
-      "Referer": "https://www.instagram.com/"
-    }
-  });
-
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-  const data = await resp.json();
-  return digGraphQLData(data);
-}
-
-function digGraphQLData(obj) {
-  if (!obj || typeof obj !== "object") return { ok: false };
-
-  const items = obj?.items || obj?.data?.items || obj?.data?.media || [];
-  const arr = Array.isArray(items) ? items : [items];
-
-  for (const item of arr) {
-    const media = item?.media || item;
-    if (!media) continue;
-
-    // Carousel
-    if (Array.isArray(media.carousel_media)) {
-      const results = [];
-      for (const cm of media.carousel_media) {
-        const r = digGraphQLData({ items: [cm] });
-        if (r.ok) results.push(r);
-      }
-      if (results.length) return { ok: true, carousel: results };
-    }
-
-    if (media.video_versions) {
-      const best = media.video_versions.reduce((a, b) =>
-        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
-        media.video_versions[0]
-      );
-      if (best?.url) return { ok: true, url: best.url, thumb: media.image_versions2?.candidates?.[0]?.url || null };
-    }
-    if (media.video_url) return { ok: true, url: media.video_url, thumb: media.thumbnail?.url || null };
-    if (media.image_versions2?.candidates) {
-      const cands = media.image_versions2.candidates;
-      const best = cands.reduce((a, b) =>
-        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
-        cands[0]
-      );
-      return { ok: true, url: best?.url, thumb: best?.url };
-    }
-  }
-
-  return { ok: false };
-}
-
-function extractShortcode(url) {
-  const patterns = ["/p/", "/reel/", "/tv/", "/reels/", "/media/"];
-  for (const p of patterns) {
-    const idx = url.indexOf(p);
-    if (idx !== -1) {
-      const rest = url.slice(idx + p.length).split(/[/?#]/)[0];
-      if (rest && rest.length >= 5) return rest;
-    }
-  }
-  return null;
-}
-
-// ── HLS m3u8 → MP4 extraction ──
-async function extractHLStoMP4(manifestUrl) {
-  if (!manifestUrl) throw new Error("No manifest URL");
-
-  const resp = await fetch(manifestUrl, {
-    headers: { "Referer": "https://www.instagram.com/" }
-  });
-  if (!resp.ok) throw new Error(`Manifest HTTP ${resp.status}`);
-
-  const text = await resp.text();
-  const lines = text.split("\n").map((l) => l.trim());
-
-  // Look for .mp4 directly
-  const mp4Line = lines.find((l) => l.includes(".mp4") && l.startsWith("http"));
-  if (mp4Line) return mp4Line;
-
-  // Look for highest bandwidth variant playlist
-  const baseUrl = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
-  const variants = [];
-  let bandwidth = 0;
-  for (const line of lines) {
-    if (line.startsWith("#EXT-X-STREAM-INF")) {
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      bandwidth = bwMatch ? parseInt(bwMatch[1]) : 0;
-    } else if (line && !line.startsWith("#") && bandwidth > 0) {
-      variants.push({ url: line.startsWith("http") ? line : baseUrl + line, bandwidth });
-      bandwidth = 0;
-    }
-  }
-  if (variants.length) {
-    variants.sort((a, b) => b.bandwidth - a.bandwidth);
-    return variants[0].url;
-  }
-
-  throw new Error("No extractable MP4 from HLS manifest");
-}
-
-// ── Embed page fallback ──
-async function fetchEmbedVideos(postUrl) {
-  if (!postUrl) throw new Error("No URL");
-
-  // Try oEmbed API first
-  try {
-    const oembedUrl = `https://graph.facebook.com/v18.0/instagram_oembed?url=${encodeURIComponent(postUrl)}&maxwidth=1080`;
-    const resp = await fetch(oembedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data.html) {
-        const mp4Match = data.html.match(/(https?:\/\/[^\s"']+\.mp4[^\s"']*)/);
-        if (mp4Match) return [mp4Match[1]];
-      }
-    }
-  } catch { /* try next */ }
-
-  // Direct /embed page
-  const embedUrl = postUrl.replace(/(\/media)?\s*$/, "").replace(/\/$/, "") + "/embed/";
-  try {
-    const resp = await fetch(embedUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
-    });
-    if (resp.ok) {
-      const html = await resp.text();
-      const urls = [];
-      let m;
-      const re1 = /<source\s+src="([^"]+)"/g;
-      while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
-      const re2 = /<video[^>]+src="([^"]+)"/g;
-      while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
-      const re3 = /(https?:\/\/[^\s"']+\.mp4[^\s"']*)/g;
-      while ((m = re3.exec(html))) { const u = m[1]; if (!urls.includes(u)) urls.push(u); }
-      if (urls.length) return urls;
-    }
-  } catch { /* failed */ }
-
-  throw new Error("All embed methods failed");
-}
-
-// FIX #8: Complete HTML entity decode
-function decHtml(s) {
-  return s
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCharCode(parseInt(n, 16)))
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
-}
-
-// ── Download: direct chrome.downloads (no fetch→blob) ──
+// ── Download ──
 function download(url, filename) {
-  if (!url || url.startsWith("blob:")) {
-    return Promise.reject(new Error("Cannot download blob URL"));
-  }
   return new Promise((resolve, reject) => {
+    if (!url || url.startsWith("blob:")) {
+      reject(new Error("Cannot download blob: URL"));
+      return;
+    }
     chrome.downloads.download(
       {
         url,
@@ -313,12 +140,33 @@ function download(url, filename) {
         saveAs: false,
         conflictAction: "uniquify"
       },
-      (id) => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(id);
-      }
+      (id) => chrome.runtime.lastError
+        ? reject(new Error(chrome.runtime.lastError.message))
+        : resolve(id)
     );
   });
+}
+
+// ── Embed fallback ──
+async function fetchEmbed(postUrl) {
+  if (!postUrl) throw new Error("No URL");
+  const embedUrl = postUrl.replace(/(\/media)?\s*$/, "").replace(/\/$/, "") + "/embed";
+  const res = await fetch(embedUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" }
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const html = await res.text();
+  const urls = [];
+  let m;
+  const re1 = /<source\s+src="([^"]+)"/g;
+  while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
+  const re2 = /<video[^>]+src="([^"]+)"/g;
+  while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
+  return urls;
+}
+
+function decHtml(s) {
+  return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
 }
 
 function sanitize(s) {
