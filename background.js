@@ -31,7 +31,7 @@ try {
 function classifyUrl(url) {
   // Skip tiny resources and profile pics
   if (url.includes("/t51.2885-19/")) return null; // profile pic path
-  if (url.includes("/v/t16/") || url.includes(".mp4")) return "videos";
+  if (url.includes("/v/t16/") || url.includes("/o1/v/t") || url.includes(".mp4")) return "videos";
   // Large images from posts (not story stickers, not s150x150)
   if ((url.includes(".jpg") || url.includes(".webp")) && !url.includes("s150x150")) {
     return "images";
@@ -125,7 +125,7 @@ const handlers = {
     if (tabId && msg.urls?.length) {
       const tab = getTab(tabId);
       for (const url of msg.urls) {
-        if (url.includes(".mp4") || url.includes("/v/t16/")) {
+        if (url.includes(".mp4") || url.includes("/v/t16/") || url.includes("/o1/v/t")) {
           tab.videos.set(url, Date.now());
         } else {
           tab.images.set(url, Date.now());

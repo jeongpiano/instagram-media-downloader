@@ -111,7 +111,7 @@
         if (obj.image_versions2?.candidates?.length) {
           thumb = obj.image_versions2.candidates[0].url;
         }
-        out.push({ url: best.url, type: "video", thumb, y: out.length });
+        out.push({ url: best.url, type: "video", thumb, code: obj.code || null, y: out.length });
       }
       return;
     }
@@ -163,29 +163,30 @@
       }
     }
 
-    // 2. SSR JSON — Instagram feed reels often have NO post link in the article HTML.
-    //    The shortcode is stored as "code":"SHORTCODE" in the JSON blob that also
-    //    contains "video_versions". Look 600 chars before each "video_versions" hit.
-    const ssrCodes = [];
+    // 2. SSR JSON — parse the JSON tree to find objects where "code" and "video_versions"
+    //    are siblings (they're always in the same media object, but can be 30k+ chars apart
+    //    in the raw text, so text-search windows don't work).
+    const ssrEntries = []; // [{code, url}]
     for (const s of document.querySelectorAll('script[type="application/json"]')) {
-      const text = s.textContent;
-      let idx = text.indexOf('"video_versions"');
-      while (idx !== -1) {
-        const chunk = text.slice(Math.max(0, idx - 600), idx);
-        const hits = chunk.match(/"code"\s*:\s*"([\w-]{8,15})"/g) || [];
-        for (const h of hits) {
-          const c = h.match(/"code"\s*:\s*"([\w-]{8,15})"/)[1];
-          if (!ssrCodes.includes(c)) ssrCodes.push(c);
+      try {
+        const items = [];
+        findMediaUrls(JSON.parse(s.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.code) ssrEntries.push({ code: item.code, url: item.url });
         }
-        idx = text.indexOf('"video_versions"', idx + 1);
-      }
+      } catch {}
     }
-    if (ssrCodes.length === 1) return ssrCodes[0];
-    if (ssrCodes.length > 1) {
-      // Multiple video posts — pick by article index
+    if (ssrEntries.length === 1) return ssrEntries[0].code;
+    if (ssrEntries.length > 1) {
+      // Match by video element index — works on reels page where there are no <article> elements
+      const allVideos = [...document.querySelectorAll("video")];
+      const vIdx = allVideos.indexOf(videoEl);
+      if (vIdx >= 0 && vIdx < ssrEntries.length) return ssrEntries[vIdx].code;
+      // Fallback: article index
       const allArticles = [...document.querySelectorAll("article")];
-      const idx = allArticles.indexOf(videoEl.closest("article"));
-      return ssrCodes[idx >= 0 && idx < ssrCodes.length ? idx : 0];
+      const aIdx = allArticles.indexOf(videoEl.closest("article"));
+      if (aIdx >= 0 && aIdx < ssrEntries.length) return ssrEntries[aIdx].code;
+      return ssrEntries[0].code;
     }
 
     // 3. Page URL — safe only on dedicated single-post pages (≤1 video)
@@ -627,8 +628,18 @@
       }
     }
 
-    // No confident match (video not in SSR range — dynamically loaded post)
-    // Return "" so strategy 4 can use the most-recently-captured network URL
+    // No articles (reels page, stories, etc.) — match by video element index
+    const allVideos = Array.from(document.querySelectorAll("video"));
+    const videoIdx = allVideos.indexOf(video);
+    if (videoIdx >= 0 && videoIdx < allSsrVideoUrls.length) {
+      return allSsrVideoUrls[videoIdx];
+    }
+    // Last resort: only 1 video visible → use first SSR URL
+    const visibleVideos = allVideos.filter(v => {
+      const r = v.getBoundingClientRect();
+      return r.height > 0 && r.top < window.innerHeight && r.bottom > 0;
+    });
+    if (visibleVideos.length === 1 && allSsrVideoUrls.length > 0) return allSsrVideoUrls[0];
     return "";
   }
 

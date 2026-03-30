@@ -32,12 +32,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (!code || seenCodes.has(code)) continue;
         seenCodes.add(code);
         try {
-          const r = await chrome.runtime.sendMessage({
-            type: "FETCH_EMBED_VIDEOS",
-            postUrl: `https://www.instagram.com/p/${code}/`
-          });
-          if (r?.videoUrls?.length) {
-            const newUrl = r.videoUrls[0];
+          // Try /reel/, /p/, /tv/ in order — reels only respond to /reel/CODE/embed
+          let newUrl = null;
+          for (const t of ["reel", "p", "tv"]) {
+            const r = await chrome.runtime.sendMessage({
+              type: "FETCH_EMBED_VIDEOS",
+              postUrl: `https://www.instagram.com/${t}/${code}/`
+            });
+            if (r?.videoUrls?.length) { newUrl = r.videoUrls[0]; break; }
+          }
+          if (newUrl) {
             // Swap placeholder/old URL with real URL in videoSet
             videoSet.delete(oldUrl);
             videoSet.add(newUrl);
@@ -313,26 +317,30 @@ function scanPage() {
         if (am) return am[2];
       }
     }
-    // SSR JSON: "code" field near "video_versions"
-    const ssrCodes = [];
-    for (const s of document.querySelectorAll('script[type="application/json"]')) {
-      const text = s.textContent;
-      let idx = text.indexOf('"video_versions"');
-      while (idx !== -1) {
-        const chunk = text.slice(Math.max(0, idx - 600), idx);
-        const hits = chunk.match(/"code"\s*:\s*"([\w-]{8,15})"/g) || [];
-        for (const h of hits) {
-          const c = h.match(/"code"\s*:\s*"([\w-]{8,15})"/)[1];
-          if (!ssrCodes.includes(c)) ssrCodes.push(c);
-        }
-        idx = text.indexOf('"video_versions"', idx + 1);
+    // SSR JSON: parse tree to find "code" sibling of "video_versions"
+    // (text-search window approach breaks when "code" is 30k+ chars from "video_versions")
+    const ssrEntries = [];
+    function collectVideoEntries(obj, d) {
+      if (d > 25 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj.video_versions) && obj.code) {
+        const url = obj.video_versions[0]?.url;
+        if (url) ssrEntries.push({ code: obj.code, url });
+        return;
       }
+      for (const v of (Array.isArray(obj) ? obj : Object.values(obj))) collectVideoEntries(v, d + 1);
     }
-    if (ssrCodes.length === 1) return ssrCodes[0];
-    if (ssrCodes.length > 1) {
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      try { collectVideoEntries(JSON.parse(s.textContent), 0); } catch {}
+    }
+    if (ssrEntries.length === 1) return ssrEntries[0].code;
+    if (ssrEntries.length > 1) {
+      const allVideos = [...document.querySelectorAll("video")];
+      const vIdx = allVideos.indexOf(el);
+      if (vIdx >= 0 && vIdx < ssrEntries.length) return ssrEntries[vIdx].code;
       const allArticles = [...document.querySelectorAll("article")];
-      const idx = allArticles.indexOf(article);
-      return ssrCodes[idx >= 0 && idx < ssrCodes.length ? idx : 0];
+      const aIdx = allArticles.indexOf(article);
+      if (aIdx >= 0 && aIdx < ssrEntries.length) return ssrEntries[aIdx].code;
+      return ssrEntries[0].code;
     }
     const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
     if (m && document.querySelectorAll("video").length <= 1) return m[2];
@@ -384,7 +392,7 @@ function scanPage() {
         if (obj.image_versions2?.candidates?.length) {
           thumb = obj.image_versions2.candidates[0].url;
         }
-        ssrVideos.push({ url: best.url, thumb });
+        ssrVideos.push({ url: best.url, thumb, code: obj.code || null });
       }
       return;
     }
@@ -435,7 +443,7 @@ function scanPage() {
       if (ssrVideoIdx < ssrVideos.length) {
         const ssr = ssrVideos[ssrVideoIdx];
         videos.push(ssr.url);
-        shortcodes[ssr.url] = code;
+        shortcodes[ssr.url] = ssr.code || code; // prefer code from SSR object itself
         src = ssr.url;
         if (ssr.thumb) thumb = ssr.thumb;
         ssrVideoIdx++;
