@@ -265,7 +265,7 @@
       return;
     }
 
-    const filename = buildFilename("jpg");
+    const filename = buildFilename("jpg", img);
     const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
     if (resp?.ok) {
       showStatus(btn, prev, `${ICON_CHECK}<span>Saved!</span>`, 2500);
@@ -322,7 +322,7 @@
 
       // Strategy 5: embed endpoint fallback
       if (!url) {
-        const postUrl = location.href.split("?")[0];
+        const postUrl = findPostUrlNear(video) || location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
         const embedUrls = embed?.videoUrls || [];
         if (embedUrls.length) url = embedUrls[0];
@@ -333,7 +333,7 @@
         return;
       }
 
-      const filename = buildFilename("mp4");
+      const filename = buildFilename("mp4", video);
       const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
       if (resp?.ok) {
         showStatus(btn, prev, `${ICON_CHECK}<span>Saved!</span>`, 2500);
@@ -396,17 +396,44 @@
   }
 
   // ── Helpers ──
-  function buildFilename(ext) {
-    const parts = location.pathname.split("/").filter(Boolean);
-    // Instagram post patterns: /p/CODE/, /reel/CODE/, /tv/CODE/, /reels/CODE/, /stories/USER/ID/
-    const postTypes = ["p", "reel", "tv", "reels", "stories"];
-    let postId = "instagram";
-    for (let i = 0; i < parts.length; i++) {
-      if (postTypes.includes(parts[i]) && parts[i + 1]) {
-        postId = parts[i + 1];
-        break;
+
+  /** Extract post URL from nearest <a> link around a media element */
+  function findPostUrlNear(el) {
+    let node = el;
+    for (let i = 0; i < 15 && node; i++) {
+      // Check <a> tags inside or on the node itself
+      const links = node.tagName === "A" ? [node] : [...(node.querySelectorAll?.("a[href]") || [])];
+      for (const a of links) {
+        const href = a.getAttribute("href") || "";
+        if (POST_PATTERN.test(href)) {
+          // Normalize to full URL
+          try { return new URL(href, location.origin).href.split("?")[0]; } catch {}
+        }
       }
+      node = node.parentElement;
     }
+    return "";
+  }
+
+  /** Extract shortcode from a URL path */
+  function extractShortcode(url) {
+    try {
+      const parts = new URL(url, location.origin).pathname.split("/").filter(Boolean);
+      const postTypes = ["p", "reel", "tv", "reels", "stories"];
+      for (let i = 0; i < parts.length; i++) {
+        if (postTypes.includes(parts[i]) && parts[i + 1]) return parts[i + 1];
+      }
+    } catch {}
+    return "";
+  }
+
+  function buildFilename(ext, mediaEl) {
+    // 1) Try shortcode from nearest post link (works on feed pages)
+    let postId = mediaEl ? extractShortcode(findPostUrlNear(mediaEl)) : "";
+    // 2) Fallback to current page URL
+    if (!postId) postId = extractShortcode(location.href);
+    // 3) Final fallback
+    if (!postId) postId = "instagram";
     return `instagram/${postId}_${Date.now()}.${ext}`;
   }
 
