@@ -243,17 +243,9 @@
       // Clear stale data from previous navigation (Instagram reuses <video> elements)
       delete video.dataset.imdCode;
       delete video.dataset.imdVideoUrl;
-      delete video.dataset.imdSsrUrl;
-      // Store shortcode AND direct CDN URL from SSR JSON
+      // Store shortcode so downloadVideo() can look up the correct CDN URL
       const code = getPostCode(video);
       if (code) video.dataset.imdCode = code;
-      // Also store the SSR CDN URL directly on the element (most reliable for download)
-      const ssrEntries = getSsrVideoEntries();
-      const allVideos = [...document.querySelectorAll("video")];
-      const vIdx = allVideos.indexOf(video);
-      if (vIdx >= 0 && vIdx < ssrEntries.length && ssrEntries[vIdx].url) {
-        video.dataset.imdSsrUrl = ssrEntries[vIdx].url;
-      }
       const container = findContainer(video, true);
       if (container && !container.querySelector(`.${WRAP_CLASS}`)) attachOverlay(container, video, "video");
     }
@@ -593,11 +585,14 @@
       const code = freshCode || video.dataset.imdCode || "";
       if (freshCode) video.dataset.imdCode = freshCode;
 
-      // ── Strategy 1: SSR JSON direct CDN URL (stored at scan time per-video) ──
-      // This is the most reliable: index-matched to this specific video element,
-      // no network roundtrip, no code needed.
-      if (video.dataset.imdSsrUrl) {
-        url = video.dataset.imdSsrUrl;
+      // ── Strategy 1: SSR JSON CDN URL matched by CODE (not index!) ──
+      // Index matching is unreliable because SSR data is from initial page load
+      // but video elements change as user scrolls. Code matching guarantees
+      // the URL is for the correct video.
+      if (!url && code) {
+        const ssrEntries = getSsrVideoEntries();
+        const match = ssrEntries.find(e => e.code && e.code === code);
+        if (match) url = match.url;
       }
 
       // ── Strategy 2: CDN URL captured when this video played ──
@@ -619,10 +614,7 @@
         }
       }
 
-      // ── Strategy 5: SSR JSON by video index (fresh parse) ──
-      if (!url) url = findVideoUrlFromScriptsNear(video);
-
-      // ── Strategy 6: data attributes on parent elements ──
+      // ── Strategy 5: data attributes on parent elements ──
       if (!url) url = findVideoUrlInPost(video);
 
       // ── Strategy 7: network-captured URLs (last resort) ──
