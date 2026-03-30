@@ -1,21 +1,12 @@
-/* ── Button wrapper ── */
+/* ── Button wrapper — top-right on all media ── */
 .imd-wrap {
   position: absolute;
   right: 10px;
-  bottom: 10px;
+  top: 10px;
   z-index: 2147483647;
   opacity: 1;
   transform: translateY(0);
   pointer-events: none;
-}
-
-/* Video button: top-right, always visible (on the video element itself) */
-.imd-wrap.imd-video {
-  right: 10px;
-  top: 10px;
-  bottom: auto;
-  opacity: 1;
-  transform: translateY(0);
 }
 
 /* Keep full opacity during download status */

@@ -29,10 +29,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     return;
   }
 
-  // Supplement: only merge thumbnails from background (don't add ALL captured URLs — viewport filter handles selection)
+  // Supplement: merge thumbnails + network-captured post images from background
+  // (t51.2885-15 = Instagram post/feed images — includes carousel slides the user swiped through)
   try {
     const r = await chrome.runtime.sendMessage({ type: "GET_CAPTURED_URLS", tabId: tab.id });
     if (r?.thumbnails) Object.assign(allThumbnails, r.thumbnails);
+    (r?.imageUrls || []).forEach((u) => {
+      if (u.includes("/t51.2885-15/") && !u.includes("s150x150") && !u.includes("s320x320")) {
+        imageSet.add(u);
+        if (!allThumbnails[u]) allThumbnails[u] = u;
+      }
+    });
   } catch {}
 
   // Fallback: if no media found at all (e.g. single post page), use network + embed
@@ -228,8 +235,24 @@ function scanPage() {
     try { digSSR(JSON.parse(s.textContent), 0); } catch {}
   }
 
+  // Regex fallback: extract post image CDN URLs directly from raw SSR JSON text
+  // (handles deeply nested / differently structured Instagram JSON)
+  for (const s of document.querySelectorAll('script[type="application/json"]')) {
+    const text = s.textContent;
+    // t51.2885-15 = Instagram feed/post images (not profiles, not stories)
+    const re = /https:\/\/[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]*t51\.2885-15[^"]*(?:jpg|webp)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const url = m[0].replace(/\\u0026/g, "&");
+      if (!url.includes("s150x150") && !url.includes("s320x320") &&
+          !ssrImages.find(i => i.url === url)) {
+        ssrImages.push({ url });
+      }
+    }
+  }
+
   function digSSR(obj, d) {
-    if (d > 20 || !obj || typeof obj !== "object") return;
+    if (d > 50 || !obj || typeof obj !== "object") return;
     if (Array.isArray(obj.video_versions)) {
       const best = obj.video_versions[0];
       if (best?.url) {

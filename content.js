@@ -329,17 +329,19 @@
         url = findVideoUrlFromScriptsNear(video);
       }
 
-      // Strategy 4: network-captured CDN URLs (prefer full videos, not DASH segments)
+      // Strategy 4: network-captured CDN URLs — use MOST RECENT (currently playing video)
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
         if (capturedUrls.length) {
-          // Prefer URLs that look like full video files (not DASH/HLS segments)
+          // Filter out DASH/HLS segments; most recent = last in array = current video
           const fullUrls = capturedUrls.filter(u =>
             !u.includes("bytestart") && !u.includes("byteend") &&
             !u.includes("-seg-") && !u.includes("/range/")
           );
-          url = fullUrls.length ? fullUrls[0] : capturedUrls[0];
+          url = fullUrls.length
+            ? fullUrls[fullUrls.length - 1]   // most recently captured full video
+            : capturedUrls[capturedUrls.length - 1];
         }
       }
 
@@ -411,14 +413,9 @@
       }
     }
 
-    // Fallback: match by DOM video element index
-    const allVideos = Array.from(document.querySelectorAll("video"));
-    const videoIdx = allVideos.indexOf(video);
-    if (videoIdx >= 0 && videoIdx < allSsrVideoUrls.length) {
-      return allSsrVideoUrls[videoIdx];
-    }
-
-    return allSsrVideoUrls[0];
+    // No confident match (video not in SSR range — dynamically loaded post)
+    // Return "" so strategy 4 can use the most-recently-captured network URL
+    return "";
   }
 
   function getNonBlobSrc(video) {
