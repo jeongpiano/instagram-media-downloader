@@ -183,7 +183,7 @@ async function fetchEmbed(postUrl) {
   //   \"video_url\":\"https://...mp4?\u0026token...\"
   // The URL contains \u0026 (escaped &), so we must allow \+non-quote inside the capture.
   // Pattern: allow [^"\\] (normal chars) OR \\[^"] (backslash + non-quote) inside the value.
-  const re3 = /\\"video_url\\":\\"(https:(?:[^"\\]|\\[^"])*)\\"/ g;
+  const re3 = /\\"video_url\\":\\"(https:(?:[^"\\]|\\[^"])*)\\"/g;
   while ((m = re3.exec(html))) {
     const u = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
     if (!urls.includes(u)) urls.push(u);
