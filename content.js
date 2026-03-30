@@ -213,7 +213,29 @@
     return "";
   }
 
+  // Get SSR JSON entries {code, url} for all videos on the page (cached per scan cycle)
+  let _ssrCache = null;
+  function getSsrVideoEntries() {
+    if (_ssrCache) return _ssrCache;
+    const entries = [];
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      try {
+        const items = [];
+        findMediaUrls(JSON.parse(s.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.url) {
+            entries.push({ code: item.code || "", url: item.url });
+          }
+        }
+      } catch {}
+    }
+    _ssrCache = entries;
+    return entries;
+  }
+
   function scan() {
+    _ssrCache = null; // invalidate SSR cache each scan cycle
+
     // Videos
     for (const video of document.querySelectorAll("video")) {
       if (video.hasAttribute(PROCESSED)) continue;
@@ -221,9 +243,17 @@
       // Clear stale data from previous navigation (Instagram reuses <video> elements)
       delete video.dataset.imdCode;
       delete video.dataset.imdVideoUrl;
-      // Store shortcode so downloadVideo() can use embed endpoint
+      delete video.dataset.imdSsrUrl;
+      // Store shortcode AND direct CDN URL from SSR JSON
       const code = getPostCode(video);
       if (code) video.dataset.imdCode = code;
+      // Also store the SSR CDN URL directly on the element (most reliable for download)
+      const ssrEntries = getSsrVideoEntries();
+      const allVideos = [...document.querySelectorAll("video")];
+      const vIdx = allVideos.indexOf(video);
+      if (vIdx >= 0 && vIdx < ssrEntries.length && ssrEntries[vIdx].url) {
+        video.dataset.imdSsrUrl = ssrEntries[vIdx].url;
+      }
       const container = findContainer(video, true);
       if (container && !container.querySelector(`.${WRAP_CLASS}`)) attachOverlay(container, video, "video");
     }
@@ -557,101 +587,82 @@
 
     try {
       let url = "";
-      let usedStrategy = "";
 
-      // Re-derive the shortcode at download time (scan-time code may be stale
-      // after the user scrolled to a different reel).
+      // Re-derive the shortcode at download time (scan-time code may be stale).
       const freshCode = getPostCode(video);
       const code = freshCode || video.dataset.imdCode || "";
-      if (freshCode && freshCode !== video.dataset.imdCode) {
-        video.dataset.imdCode = freshCode; // update stale value
-      }
-      console.log("[IMD] downloadVideo code=" + code + " freshCode=" + freshCode + " oldCode=" + (video.dataset.imdCode||""));
+      if (freshCode) video.dataset.imdCode = freshCode;
 
-      // Strategy 0: embed endpoint via post shortcode.
-      if (code) {
+      // ── Strategy 1: SSR JSON direct CDN URL (stored at scan time per-video) ──
+      // This is the most reliable: index-matched to this specific video element,
+      // no network roundtrip, no code needed.
+      if (video.dataset.imdSsrUrl) {
+        url = video.dataset.imdSsrUrl;
+      }
+
+      // ── Strategy 2: CDN URL captured when this video played ──
+      if (!url && video.dataset.imdVideoUrl) {
+        url = video.dataset.imdVideoUrl;
+      }
+
+      // ── Strategy 3: non-blob src on the video element ──
+      if (!url) url = getNonBlobSrc(video);
+
+      // ── Strategy 4: embed endpoint via shortcode ──
+      if (!url && code) {
         for (const t of ["reel", "p", "tv"]) {
           const embed = await sendMsg({
             type: "FETCH_EMBED_VIDEOS",
             postUrl: `https://www.instagram.com/${t}/${code}/`
           });
-          if (embed?.videoUrls?.length) {
-            url = embed.videoUrls[0];
-            usedStrategy = `embed /${t}/${code}/`;
-            break;
-          }
+          if (embed?.videoUrls?.length) { url = embed.videoUrls[0]; break; }
         }
       }
 
-      // Strategy 1: URL stored at the moment this video started playing
-      if (!url && video.dataset.imdVideoUrl) {
-        url = video.dataset.imdVideoUrl;
-        usedStrategy = "imdVideoUrl";
-      }
+      // ── Strategy 5: SSR JSON by video index (fresh parse) ──
+      if (!url) url = findVideoUrlFromScriptsNear(video);
 
-      // Strategy 2: video element's non-blob src
-      if (!url) {
-        url = getNonBlobSrc(video);
-        if (url) usedStrategy = "non-blob src";
-      }
+      // ── Strategy 6: data attributes on parent elements ──
+      if (!url) url = findVideoUrlInPost(video);
 
-      // Strategy 3: data attributes on parent elements
-      if (!url) {
-        url = findVideoUrlInPost(video);
-        if (url) usedStrategy = "data-attr";
-      }
-
-      // Strategy 4: SSR JSON — get the CDN URL directly (skip embed)
-      if (!url) {
-        url = findVideoUrlFromScriptsNear(video);
-        if (url) usedStrategy = "SSR JSON direct URL";
-      }
-
-      // Strategy 5: most-recently-captured network URL
+      // ── Strategy 7: network-captured URLs (last resort) ──
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
-        if (capturedUrls.length) {
-          const fullUrls = capturedUrls.filter(u =>
-            !u.includes("bytestart") && !u.includes("byteend") &&
-            !u.includes("-seg-") && !u.includes("/range/")
+        const full = capturedUrls.filter(u =>
+          !u.includes("bytestart") && !u.includes("byteend") &&
+          !u.includes("-seg-") && !u.includes("/range/")
+        );
+        if (full.length) {
+          url = full[full.length - 1];
+        } else {
+          // Strip range params
+          const withRange = capturedUrls.filter(u =>
+            u.includes("cdninstagram") || u.includes("fbcdn")
           );
-          if (fullUrls.length) {
-            url = fullUrls[fullUrls.length - 1];
-            usedStrategy = "captured full URL";
-          } else {
-            // Strip range params to get base URL
-            const withRange = capturedUrls.filter(u =>
-              (u.includes("cdninstagram") || u.includes("fbcdn"))
-            );
-            if (withRange.length) {
-              url = withRange[withRange.length - 1]
-                .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
-                .replace(/[?&]$/, "");
-              usedStrategy = "captured range-stripped URL";
-            }
+          if (withRange.length) {
+            url = withRange[withRange.length - 1]
+              .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
+              .replace(/[?&]$/, "");
           }
         }
       }
 
-      // Strategy 6: embed endpoint from current page URL
+      // ── Strategy 8: embed from current page URL ──
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-        if (embed?.videoUrls?.length) {
-          url = embed.videoUrls[0];
-          usedStrategy = "embed from page URL";
-        }
+        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
       }
-
-      console.log("[IMD] downloadVideo strategy=" + usedStrategy + " url=" + (url?.slice(0, 80) || "NONE"));
 
       if (!url) {
         showStatus(btn, prev, "No video found", 2500);
         return;
       }
 
-      const filename = buildFilename("mp4");
+      // Use code in filename so user can tell downloads apart
+      const postId = code || location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/)?.[2] || "instagram";
+      const filename = `instagram/${postId}_${Date.now()}.mp4`;
       const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
       if (resp?.ok) {
         showStatus(btn, prev, `${ICON_CHECK}<span>Saved!</span>`, 2500);
