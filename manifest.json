@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Instagram Media Downloader",
-  "version": "1.0.0",
-  "description": "Download photos, videos, Reels, and Stories from Instagram with one click.",
+  "version": "2.0.0",
+  "description": "Download photos, videos, Reels, and Stories from Instagram with one click. v2: HLS streaming + GraphQL fallback + data-videoUrl DOM support.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

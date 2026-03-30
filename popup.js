@@ -38,6 +38,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (r?.thumbnails) Object.assign(allThumbnails, r.thumbnails);
   } catch {}
 
+  // ── GraphQL API fallback ──
+  if (videoSet.size === 0) {
+    try {
+      const postUrl = tab.url.split("?")[0];
+      const r = await chrome.runtime.sendMessage({ type: "FETCH_GRAPHQL_MEDIA", postUrl });
+      if (r?.url) videoSet.add(r.url);
+    } catch {}
+  }
+
   // ── Embed fallback for videos ──
   if (videoSet.size === 0) {
     try {
@@ -197,6 +206,22 @@ function scanPage() {
       videos.push(source.src);
       if (v.poster) thumbnails[source.src] = v.poster;
     }
+    // FIX: data-videoUrl attribute (new Instagram)
+    for (const attr of ["data-videoUrl", "data-video-url", "data-video-src", "data-src"]) {
+      const attrVal = v.getAttribute(attr);
+      if (attrVal && !attrVal.startsWith("blob:") && (attrVal.includes(".mp4") || attrVal.includes("/v/"))) {
+        videos.push(attrVal);
+      }
+    }
+    // Also check dataset
+    if (v.dataset) {
+      for (const key of Object.keys(v.dataset)) {
+        const val = v.dataset[key];
+        if (val && !val.startsWith("blob:") && (val.includes(".mp4") || val.includes("/v/"))) {
+          videos.push(val);
+        }
+      }
+    }
   }
 
   // DOM img elements (CDN only, large)
@@ -211,7 +236,7 @@ function scanPage() {
   return { videos: [...new Set(videos)], images: [...new Set(images)], thumbnails };
 
   function dig(obj, d) {
-    if (d > 25 || !obj || typeof obj !== "object") return;
+    if (d > 30 || !obj || typeof obj !== "object") return;
     if (Array.isArray(obj.video_versions)) {
       const best = obj.video_versions[obj.video_versions.length - 1];
       if (best?.url) {
@@ -221,6 +246,9 @@ function scanPage() {
       return;
     }
     if (typeof obj.video_url === "string") videos.push(obj.video_url);
+    if (obj.video_dash_manifest && typeof obj.video_dash_manifest === "string") {
+      // Can't parse DASH manifest in popup — handled by background
+    }
     if (obj.image_versions2?.candidates) {
       const cands = obj.image_versions2.candidates;
       const best = cands[cands.length - 1] || cands[0];
@@ -230,10 +258,24 @@ function scanPage() {
       }
       return;
     }
+    // display_resources (Instagram video posts)
+    if (Array.isArray(obj.display_resources)) {
+      const best = obj.display_resources[obj.display_resources.length - 1];
+      if (best?.src) {
+        images.push(best.src);
+        thumbnails[best.src] = best.src;
+      }
+      return;
+    }
     if (Array.isArray(obj.carousel_media)) {
       for (const m of obj.carousel_media) dig(m, d + 1);
       return;
     }
+    if (Array.isArray(obj.items)) {
+      for (const item of obj.items) dig(item, d + 1);
+      return;
+    }
+    if (obj.media) { dig(obj.media, d + 1); return; }
     for (const v of (Array.isArray(obj) ? obj : Object.values(obj))) dig(v, d + 1);
   }
 }
