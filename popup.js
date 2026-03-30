@@ -23,6 +23,31 @@ document.addEventListener("DOMContentLoaded", async () => {
       result.result.videos.forEach((u) => videoSet.add(u));
       result.result.images.forEach((u) => imageSet.add(u));
       Object.assign(allThumbnails, result.result.thumbnails || {});
+
+      // For each video shortcode, fetch embed endpoint to get correct CDN URL
+      // (replaces SSR-ordered placeholder or blob: fallback with the real URL)
+      const shortcodes = result.result.shortcodes || {};
+      const seenCodes = new Set();
+      for (const [oldUrl, code] of Object.entries(shortcodes)) {
+        if (!code || seenCodes.has(code)) continue;
+        seenCodes.add(code);
+        try {
+          const r = await chrome.runtime.sendMessage({
+            type: "FETCH_EMBED_VIDEOS",
+            postUrl: `https://www.instagram.com/p/${code}/`
+          });
+          if (r?.videoUrls?.length) {
+            const newUrl = r.videoUrls[0];
+            // Swap placeholder/old URL with real URL in videoSet
+            videoSet.delete(oldUrl);
+            videoSet.add(newUrl);
+            if (allThumbnails[oldUrl]) {
+              allThumbnails[newUrl] = allThumbnails[oldUrl];
+              delete allThumbnails[oldUrl];
+            }
+          }
+        } catch {}
+      }
     }
   } catch (e) {
     status.textContent = "페이지 스캔 실패. 새로고침 후 다시 시도해주세요.";
@@ -220,13 +245,52 @@ function shortUrl(url) {
   catch { return "media"; }
 }
 
-// Runs in content script context — only returns media visible in current viewport
+// Runs in content script context — returns viewport videos + all article images
 function scanPage() {
   const videos = [];
   const images = [];
   const thumbnails = {};
+  const shortcodes = {}; // videoUrl -> postCode (for embed endpoint lookup)
   const vh = window.innerHeight;
   const cdnRe = /cdninstagram\.com|fbcdn\.net|scontent[^.]*\.instagram\.com/;
+
+  // Find the article most visible in the current viewport
+  function findMainArticle() {
+    let best = null, bestH = 0;
+    for (const a of document.querySelectorAll("article")) {
+      const r = a.getBoundingClientRect();
+      const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+      if (h > bestH) { bestH = h; best = a; }
+    }
+    return best;
+  }
+
+  // Extract post shortcode from an element's nearest article or the page URL
+  function extractCode(el) {
+    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+    if (m) return m[2];
+    const article = el.closest("article");
+    if (article) {
+      const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
+      if (a) {
+        const am = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+        if (am) return am[2];
+      }
+    }
+    return "";
+  }
+
+  // Best quality URL from a srcset attribute string
+  function bestFromSrcset(srcset) {
+    if (!srcset) return "";
+    const cands = srcset.split(",").map(s => {
+      const parts = s.trim().split(/\s+/);
+      return { url: parts[0], w: parseInt(parts[1]) || 0 };
+    }).filter(c => cdnRe.test(c.url));
+    if (!cands.length) return "";
+    cands.sort((a, b) => b.w - a.w);
+    return cands[0].url;
+  }
 
   // ── Step 1: Extract ALL video/image URLs from SSR JSON (for matching blob: videos) ──
   const ssrVideos = []; // { url, thumb }
@@ -292,19 +356,30 @@ function scanPage() {
     // Non-blob source
     if (src && !src.startsWith("blob:")) {
       videos.push(src);
+      shortcodes[src] = extractCode(v);
       if (thumb) thumbnails[src] = thumb;
     } else if (sourceSrc && !sourceSrc.startsWith("blob:")) {
       videos.push(sourceSrc);
+      shortcodes[sourceSrc] = extractCode(v);
       if (thumb) thumbnails[sourceSrc] = thumb;
       src = sourceSrc;
     } else {
-      // blob: video — match to SSR JSON URL by order
+      // blob: video — match to SSR JSON URL by order; shortcode gives embed fallback
       if (ssrVideoIdx < ssrVideos.length) {
         const ssr = ssrVideos[ssrVideoIdx];
         videos.push(ssr.url);
+        shortcodes[ssr.url] = extractCode(v);
         src = ssr.url;
         if (ssr.thumb) thumb = ssr.thumb;
         ssrVideoIdx++;
+      } else {
+        // No SSR match — store placeholder so embed fallback can fill in later
+        const code = extractCode(v);
+        if (code) {
+          const placeholder = `__embed__${code}`;
+          videos.push(placeholder);
+          shortcodes[placeholder] = code;
+        }
       }
     }
 
@@ -327,26 +402,19 @@ function scanPage() {
     if (src && thumb) thumbnails[src] = thumb;
   }
 
-  // ── Step 3: Scan DOM images in viewport ──
-  for (const img of document.querySelectorAll("img")) {
-    const r = img.getBoundingClientRect();
-    if (r.bottom < 0 || r.top > vh) continue; // Not in viewport
-
-    let src = img.src || img.currentSrc || "";
-    if (!cdnRe.test(src)) {
-      const srcset = img.getAttribute("srcset");
-      if (srcset) {
-        for (const part of srcset.split(",")) {
-          const url = part.trim().split(/\s+/)[0];
-          if (cdnRe.test(url)) { src = url; break; }
-        }
-      }
-    }
+  // ── Step 3: Scan ALL images inside the most-visible article (captures full carousel) ──
+  const mainArticle = findMainArticle();
+  const imgScope = mainArticle || document; // fallback: whole doc
+  for (const img of imgScope.querySelectorAll("img")) {
+    // Best-quality URL from srcset, fallback to src
+    let src = bestFromSrcset(img.getAttribute("srcset")) || img.src || img.currentSrc || "";
     if (!cdnRe.test(src)) continue;
-    if (src.includes("/t51.2885-19/")) continue;
+    if (src.includes("/t51.2885-19/")) continue; // profile pics
+    if (src.includes("s150x150") || src.includes("s320x320")) continue; // tiny thumbnails
+    const r = img.getBoundingClientRect();
     const w = r.width || img.naturalWidth || parseInt(img.getAttribute("width")) || 0;
     const h = r.height || img.naturalHeight || parseInt(img.getAttribute("height")) || 0;
-    if (w >= 150 && h >= 150) {
+    if (w >= 100 && h >= 100) {
       images.push(src);
       thumbnails[src] = src;
     }
@@ -360,7 +428,7 @@ function scanPage() {
     }
   }
 
-  return { videos: [...new Set(videos)], images: [...new Set(images)], thumbnails };
+  return { videos: [...new Set(videos)], images: [...new Set(images)], thumbnails, shortcodes };
 }
 
 function extractPostId(url) {

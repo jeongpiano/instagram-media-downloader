@@ -151,11 +151,31 @@
     }, 800);
   }
 
+  // Extract the Instagram post shortcode nearest to a video element
+  function getPostCode(videoEl) {
+    // Single post page — read from URL
+    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+    if (m) return m[2];
+    // Feed — find the closest <a href="/p/CODE/"> or /reel/CODE/
+    const article = videoEl.closest("article");
+    if (article) {
+      const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
+      if (a) {
+        const am = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+        if (am) return am[2];
+      }
+    }
+    return "";
+  }
+
   function scan() {
-    // Videos — button goes on the video element itself
+    // Videos
     for (const video of document.querySelectorAll("video")) {
       if (video.hasAttribute(PROCESSED)) continue;
       video.setAttribute(PROCESSED, "video");
+      // Store shortcode so downloadVideo() can use embed endpoint
+      const code = getPostCode(video);
+      if (code) video.dataset.imdCode = code;
       const container = findContainer(video, true);
       if (container && !container.querySelector(`.${WRAP_CLASS}`)) attachOverlay(container, video, "video");
     }
@@ -256,15 +276,27 @@
     wrap.addEventListener("mouseenter", show);
     wrap.addEventListener("mouseleave", hide);
 
-    // Also watch for src changes on video
+    // For videos: capture CDN URL at the moment the video starts playing
     if (isVideo) {
+      const storeCapturedUrl = () => {
+        if (mediaEl.dataset.imdVideoUrl) return; // already stored
+        setTimeout(async () => {
+          const c = await sendMsg({ type: "GET_CAPTURED_URLS" });
+          const full = (c?.urls || []).filter(u =>
+            !u.includes("bytestart") && !u.includes("-seg-") && !u.includes("/range/")
+          );
+          if (full.length) mediaEl.dataset.imdVideoUrl = full[full.length - 1];
+        }, 400); // brief wait for webRequest to record the URL
+      };
+      mediaEl.addEventListener("play",        storeCapturedUrl, { once: true });
+      mediaEl.addEventListener("loadeddata",  storeCapturedUrl, { once: true });
+
+      // Watch for non-blob src changes
       const srcObs = new MutationObserver(() => {
         const s = mediaEl.currentSrc || mediaEl.src || "";
-        const poster = mediaEl.poster || "";
         if (s && !s.startsWith("blob:")) {
-          const msg = { type: "EXTRACT_FROM_SCRIPTS", urls: [s] };
-          if (poster) msg.thumbnails = { [s]: poster };
-          try { chrome.runtime.sendMessage(msg); } catch (_) {}
+          mediaEl.dataset.imdVideoUrl = s;
+          try { chrome.runtime.sendMessage({ type: "EXTRACT_FROM_SCRIPTS", urls: [s] }); } catch (_) {}
         }
       });
       srcObs.observe(mediaEl, { attributes: true, attributeFilter: ["src"] });
@@ -316,41 +348,45 @@
     try {
       let url = "";
 
+      // Strategy 0: URL stored at the moment this video started playing (most accurate)
+      if (video.dataset.imdVideoUrl) url = video.dataset.imdVideoUrl;
+
       // Strategy 1: video element's non-blob src
-      url = getNonBlobSrc(video);
+      if (!url) url = getNonBlobSrc(video);
 
-      // Strategy 2: look in parent article/post data
-      if (!url) {
-        url = findVideoUrlInPost(video);
+      // Strategy 2: data attributes on parent elements
+      if (!url) url = findVideoUrlInPost(video);
+
+      // Strategy 2.5: embed endpoint using post shortcode (reliable for public posts on feed)
+      if (!url && video.dataset.imdCode) {
+        const postUrl = `https://www.instagram.com/p/${video.dataset.imdCode}/`;
+        const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
+        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
       }
 
-      // Strategy 3: from SSR JSON scripts near this video
-      if (!url) {
-        url = findVideoUrlFromScriptsNear(video);
-      }
+      // Strategy 3: SSR JSON scripts (matched by article position)
+      if (!url) url = findVideoUrlFromScriptsNear(video);
 
-      // Strategy 4: network-captured CDN URLs — use MOST RECENT (currently playing video)
+      // Strategy 4: most-recently-captured network URL (current video most likely)
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
         if (capturedUrls.length) {
-          // Filter out DASH/HLS segments; most recent = last in array = current video
           const fullUrls = capturedUrls.filter(u =>
             !u.includes("bytestart") && !u.includes("byteend") &&
             !u.includes("-seg-") && !u.includes("/range/")
           );
           url = fullUrls.length
-            ? fullUrls[fullUrls.length - 1]   // most recently captured full video
+            ? fullUrls[fullUrls.length - 1]
             : capturedUrls[capturedUrls.length - 1];
         }
       }
 
-      // Strategy 5: embed endpoint fallback
+      // Strategy 5: embed endpoint from current page URL
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-        const embedUrls = embed?.videoUrls || [];
-        if (embedUrls.length) url = embedUrls[0];
+        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
       }
 
       if (!url) {
