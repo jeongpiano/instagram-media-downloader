@@ -152,10 +152,8 @@
   }
 
   // Extract the Instagram post shortcode nearest to a video element.
-  // IMPORTANT: location.pathname is checked LAST because on the feed, opening a reel
-  // modal changes the URL to /reel/CODE/ — causing every video to get the same code.
   function getPostCode(videoEl) {
-    // 1. Nearest article link — most accurate on feed (each article has its own post link)
+    // 1. Nearest article link (works when article has a timestamp/permalink <a>)
     const article = videoEl.closest("article");
     if (article) {
       const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
@@ -164,10 +162,35 @@
         if (am) return am[2];
       }
     }
-    // 2. Page URL — only safe when there is exactly 1 video (dedicated post page, not feed+modal)
+
+    // 2. SSR JSON — Instagram feed reels often have NO post link in the article HTML.
+    //    The shortcode is stored as "code":"SHORTCODE" in the JSON blob that also
+    //    contains "video_versions". Look 600 chars before each "video_versions" hit.
+    const ssrCodes = [];
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      const text = s.textContent;
+      let idx = text.indexOf('"video_versions"');
+      while (idx !== -1) {
+        const chunk = text.slice(Math.max(0, idx - 600), idx);
+        const hits = chunk.match(/"code"\s*:\s*"([\w-]{8,15})"/g) || [];
+        for (const h of hits) {
+          const c = h.match(/"code"\s*:\s*"([\w-]{8,15})"/)[1];
+          if (!ssrCodes.includes(c)) ssrCodes.push(c);
+        }
+        idx = text.indexOf('"video_versions"', idx + 1);
+      }
+    }
+    if (ssrCodes.length === 1) return ssrCodes[0];
+    if (ssrCodes.length > 1) {
+      // Multiple video posts — pick by article index
+      const allArticles = [...document.querySelectorAll("article")];
+      const idx = allArticles.indexOf(videoEl.closest("article"));
+      return ssrCodes[idx >= 0 && idx < ssrCodes.length ? idx : 0];
+    }
+
+    // 3. Page URL — safe only on dedicated single-post pages (≤1 video)
     const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
     if (m && document.querySelectorAll("video").length <= 1) return m[2];
-    // 3. URL fallback (better than nothing even if imperfect)
     if (m) return m[2];
     return "";
   }
@@ -276,7 +299,7 @@
 
     function findSlideBtn(next) {
       const nextLabels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti"];
-      const prevLabels = ["Go back", "이전", "Anterior", "Zurück", "Précédent", "前へ", "上一张", "Indietro"];
+      const prevLabels = ["돌아가기", "Go back", "이전", "Anterior", "Zurück", "Précédent", "前へ", "上一张", "Indietro"];
       for (const label of (next ? nextLabels : prevLabels)) {
         const b = article.querySelector(`button[aria-label="${label}"]`);
         if (b) return b;

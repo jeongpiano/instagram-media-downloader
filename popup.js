@@ -303,7 +303,7 @@ function scanPage() {
     return best;
   }
 
-  // Extract post shortcode — article link first to avoid feed+modal same-code bug
+  // Extract post shortcode — article link → SSR JSON → URL
   function extractCode(el) {
     const article = el.closest("article");
     if (article) {
@@ -312,6 +312,27 @@ function scanPage() {
         const am = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
         if (am) return am[2];
       }
+    }
+    // SSR JSON: "code" field near "video_versions"
+    const ssrCodes = [];
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      const text = s.textContent;
+      let idx = text.indexOf('"video_versions"');
+      while (idx !== -1) {
+        const chunk = text.slice(Math.max(0, idx - 600), idx);
+        const hits = chunk.match(/"code"\s*:\s*"([\w-]{8,15})"/g) || [];
+        for (const h of hits) {
+          const c = h.match(/"code"\s*:\s*"([\w-]{8,15})"/)[1];
+          if (!ssrCodes.includes(c)) ssrCodes.push(c);
+        }
+        idx = text.indexOf('"video_versions"', idx + 1);
+      }
+    }
+    if (ssrCodes.length === 1) return ssrCodes[0];
+    if (ssrCodes.length > 1) {
+      const allArticles = [...document.querySelectorAll("article")];
+      const idx = allArticles.indexOf(article);
+      return ssrCodes[idx >= 0 && idx < ssrCodes.length ? idx : 0];
     }
     const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
     if (m && document.querySelectorAll("video").length <= 1) return m[2];
@@ -512,22 +533,25 @@ async function autoAdvanceCarousel() {
     return found;
   }
 
-  // Find the "Next slide" button (try multiple aria-label locales + position-based fallback)
-  function findNextBtn() {
-    const labels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti", "Далее"];
-    for (const label of labels) {
+  // Find Next or Prev slide button
+  function findSlideBtn(isNext) {
+    const nextLabels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti", "Далее"];
+    const prevLabels = ["돌아가기", "Go back", "이전", "Anterior", "Zurück", "Précédent", "前へ", "上一张", "Indietro"];
+    for (const label of (isNext ? nextLabels : prevLabels)) {
       const b = mainArticle.querySelector(`button[aria-label="${label}"]`);
       if (b) return b;
     }
-    // Fallback: SVG-containing button on the far right of the article
+    // Position-based fallback
     const ar = mainArticle.getBoundingClientRect();
     for (const btn of mainArticle.querySelectorAll("button")) {
       if (!btn.querySelector("svg")) continue;
       const br = btn.getBoundingClientRect();
-      if (br.left > ar.right - 90 && br.width > 0 && br.width < 60) return btn;
+      if (isNext  && br.left > ar.right - 90 && br.width > 0 && br.width < 60) return btn;
+      if (!isNext && br.right < ar.left + 90 && br.width > 0 && br.width < 60) return btn;
     }
     return null;
   }
+  function findNextBtn() { return findSlideBtn(true); }
 
   // Get total slide count from "1 / N" or "1/N" overlay text
   function getTotalSlides() {
@@ -538,6 +562,12 @@ async function autoAdvanceCarousel() {
       if (m) return parseInt(m[2]);
     }
     return 0;
+  }
+
+  // Go to slide 1 first (user may have scrolled mid-carousel)
+  for (let i = 0; i < 30 && findSlideBtn(false); i++) {
+    findSlideBtn(false).click();
+    await new Promise(r => setTimeout(r, 350));
   }
 
   const allUrls = new Set(collectImages());
