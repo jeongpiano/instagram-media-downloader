@@ -307,7 +307,7 @@ function scanPage() {
     return best;
   }
 
-  // Extract post shortcode — article link → SSR JSON → URL
+  // Extract post shortcode — article link → URL → SSR JSON
   function extractCode(el) {
     const article = el.closest("article");
     if (article) {
@@ -317,8 +317,18 @@ function scanPage() {
         if (am) return am[2];
       }
     }
+    // URL code — most reliable for currently-visible video on reel/post pages
+    const urlMatch = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
+    if (urlMatch) {
+      const urlCode = urlMatch[2];
+      const allVideos = [...document.querySelectorAll("video")];
+      if (allVideos.length <= 1) return urlCode;
+      const vh = window.innerHeight;
+      const vr = el.getBoundingClientRect();
+      const visibleH = Math.max(0, Math.min(vr.bottom, vh) - Math.max(vr.top, 0));
+      if (visibleH / (vr.height || 1) > 0.3) return urlCode;
+    }
     // SSR JSON: parse tree to find "code" sibling of "video_versions"
-    // (text-search window approach breaks when "code" is 30k+ chars from "video_versions")
     const ssrEntries = [];
     function collectVideoEntries(obj, d) {
       if (d > 25 || !obj || typeof obj !== "object") return;
@@ -332,6 +342,10 @@ function scanPage() {
     for (const s of document.querySelectorAll('script[type="application/json"]')) {
       try { collectVideoEntries(JSON.parse(s.textContent), 0); } catch {}
     }
+    // Skip stale SSR data
+    if (urlMatch && ssrEntries.length > 0 && !ssrEntries.some(e => e.code === urlMatch[2])) {
+      return "";
+    }
     if (ssrEntries.length === 1) return ssrEntries[0].code;
     if (ssrEntries.length > 1) {
       const allVideos = [...document.querySelectorAll("video")];
@@ -340,11 +354,9 @@ function scanPage() {
       const allArticles = [...document.querySelectorAll("article")];
       const aIdx = allArticles.indexOf(article);
       if (aIdx >= 0 && aIdx < ssrEntries.length) return ssrEntries[aIdx].code;
-      return ssrEntries[0].code;
+      return ""; // DO NOT fallback to ssrEntries[0]
     }
-    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
-    if (m && document.querySelectorAll("video").length <= 1) return m[2];
-    if (m) return m[2];
+    if (urlMatch) return urlMatch[2];
     return "";
   }
 

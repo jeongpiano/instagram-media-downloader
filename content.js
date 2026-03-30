@@ -163,9 +163,24 @@
       }
     }
 
-    // 2. SSR JSON — parse the JSON tree to find objects where "code" and "video_versions"
-    //    are siblings (they're always in the same media object, but can be 30k+ chars apart
-    //    in the raw text, so text-search windows don't work).
+    // 2. URL code — on reels/post pages, Instagram updates the URL to /reel/CODE/
+    //    via pushState. This is the most reliable source for the currently-visible video.
+    const urlMatch = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
+    if (urlMatch) {
+      const urlCode = urlMatch[2];
+      const allVideos = [...document.querySelectorAll("video")];
+      if (allVideos.length <= 1) return urlCode;
+      // Multiple videos: URL code belongs to the most-visible one
+      const vh = window.innerHeight;
+      const vr = videoEl.getBoundingClientRect();
+      const visibleH = Math.max(0, Math.min(vr.bottom, vh) - Math.max(vr.top, 0));
+      const totalH = vr.height || 1;
+      if (visibleH / totalH > 0.3) return urlCode; // >30% visible → it's the current reel
+    }
+
+    // 3. SSR JSON — parse the JSON tree to find objects where "code" and "video_versions"
+    //    are siblings. IMPORTANT: SSR data is from the initial page load, so it becomes
+    //    stale after the user scrolls to dynamically-loaded content.
     const ssrEntries = []; // [{code, url}]
     for (const s of document.querySelectorAll('script[type="application/json"]')) {
       try {
@@ -176,23 +191,25 @@
         }
       } catch {}
     }
+    // Validate freshness: if URL has a code not in SSR, the SSR data is stale
+    if (urlMatch && ssrEntries.length > 0 && !ssrEntries.some(e => e.code === urlMatch[2])) {
+      return ""; // SSR stale — no reliable code for this video
+    }
     if (ssrEntries.length === 1) return ssrEntries[0].code;
     if (ssrEntries.length > 1) {
-      // Match by video element index — works on reels page where there are no <article> elements
       const allVideos = [...document.querySelectorAll("video")];
       const vIdx = allVideos.indexOf(videoEl);
       if (vIdx >= 0 && vIdx < ssrEntries.length) return ssrEntries[vIdx].code;
-      // Fallback: article index
       const allArticles = [...document.querySelectorAll("article")];
       const aIdx = allArticles.indexOf(videoEl.closest("article"));
       if (aIdx >= 0 && aIdx < ssrEntries.length) return ssrEntries[aIdx].code;
-      return ssrEntries[0].code;
+      // DO NOT fallback to ssrEntries[0] — that would assign the first video's code
+      // to ALL unmatched videos, causing them to download the wrong video.
+      return "";
     }
 
-    // 3. Page URL — safe only on dedicated single-post pages (≤1 video)
-    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
-    if (m && document.querySelectorAll("video").length <= 1) return m[2];
-    if (m) return m[2];
+    // 4. Page URL — fallback for single-post pages
+    if (urlMatch) return urlMatch[2];
     return "";
   }
 
@@ -201,6 +218,9 @@
     for (const video of document.querySelectorAll("video")) {
       if (video.hasAttribute(PROCESSED)) continue;
       video.setAttribute(PROCESSED, "video");
+      // Clear stale data from previous navigation (Instagram reuses <video> elements)
+      delete video.dataset.imdCode;
+      delete video.dataset.imdVideoUrl;
       // Store shortcode so downloadVideo() can use embed endpoint
       const code = getPostCode(video);
       if (code) video.dataset.imdCode = code;
@@ -452,7 +472,21 @@
             mediaEl.dataset.imdVideoUrl = entries[0].url;
             return;
           }
-          // Fallback: last captured full URL
+          // Fallback: strip range params from captured URLs (Instagram uses bytestart/byteend
+          // for DASH/MSE streaming, but the base URL without range params downloads the full video)
+          const allEntries = (c?.urlEntries || []).filter(e =>
+            (e.url.includes("cdninstagram") || e.url.includes("fbcdn")) &&
+            !e.url.includes("-seg-")
+          );
+          if (allEntries.length) {
+            allEntries.sort((a, b) => Math.abs(a.ts - playTime) - Math.abs(b.ts - playTime));
+            const baseUrl = allEntries[0].url
+              .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
+              .replace(/[?&]$/, "");
+            mediaEl.dataset.imdVideoUrl = baseUrl;
+            return;
+          }
+          // Last fallback: last captured full URL
           const full = (c?.urls || []).filter(u =>
             !u.includes("bytestart") && !u.includes("-seg-") && !u.includes("/range/")
           );
@@ -634,12 +668,8 @@
     if (videoIdx >= 0 && videoIdx < allSsrVideoUrls.length) {
       return allSsrVideoUrls[videoIdx];
     }
-    // Last resort: only 1 video visible → use first SSR URL
-    const visibleVideos = allVideos.filter(v => {
-      const r = v.getBoundingClientRect();
-      return r.height > 0 && r.top < window.innerHeight && r.bottom > 0;
-    });
-    if (visibleVideos.length === 1 && allSsrVideoUrls.length > 0) return allSsrVideoUrls[0];
+    // No confident match — return "" so download() uses other strategies
+    // (DO NOT fallback to allSsrVideoUrls[0] — that always returns the first video)
     return "";
   }
 
