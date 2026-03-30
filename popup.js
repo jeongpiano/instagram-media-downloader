@@ -303,10 +303,8 @@ function scanPage() {
     return best;
   }
 
-  // Extract post shortcode from an element's nearest article or the page URL
+  // Extract post shortcode — article link first to avoid feed+modal same-code bug
   function extractCode(el) {
-    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
-    if (m) return m[2];
     const article = el.closest("article");
     if (article) {
       const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
@@ -315,6 +313,9 @@ function scanPage() {
         if (am) return am[2];
       }
     }
+    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+    if (m && document.querySelectorAll("video").length <= 1) return m[2];
+    if (m) return m[2];
     return "";
   }
 

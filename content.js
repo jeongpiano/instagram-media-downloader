@@ -151,12 +151,11 @@
     }, 800);
   }
 
-  // Extract the Instagram post shortcode nearest to a video element
+  // Extract the Instagram post shortcode nearest to a video element.
+  // IMPORTANT: location.pathname is checked LAST because on the feed, opening a reel
+  // modal changes the URL to /reel/CODE/ — causing every video to get the same code.
   function getPostCode(videoEl) {
-    // Single post page — read from URL
-    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
-    if (m) return m[2];
-    // Feed — find the closest <a href="/p/CODE/"> or /reel/CODE/
+    // 1. Nearest article link — most accurate on feed (each article has its own post link)
     const article = videoEl.closest("article");
     if (article) {
       const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
@@ -165,6 +164,11 @@
         if (am) return am[2];
       }
     }
+    // 2. Page URL — only safe when there is exactly 1 video (dedicated post page, not feed+modal)
+    const m = location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+    if (m && document.querySelectorAll("video").length <= 1) return m[2];
+    // 3. URL fallback (better than nothing even if imperfect)
+    if (m) return m[2];
     return "";
   }
 
@@ -197,30 +201,43 @@
       const container = findContainer(img, false);
       if (!container || container.querySelector(`.${WRAP_CLASS}`)) continue;
       attachOverlay(container, img, "image");
+    }
 
-      // Carousel detection: add "All" button to first image of each carousel article
-      const article = img.closest("article");
-      if (article && !article.hasAttribute("data-imd-all") && isCarouselArticle(article)) {
-        article.setAttribute("data-imd-all", "1");
-        const wrap = container.querySelector(`.${WRAP_CLASS}`);
-        if (wrap) addCarouselAllBtn(wrap, article);
-      }
+    // ── Carousel "All" button — separate pass so it runs even for already-processed images ──
+    for (const article of document.querySelectorAll("article")) {
+      if (article.hasAttribute("data-imd-all")) continue;
+      if (!isCarouselArticle(article)) continue;
+      article.setAttribute("data-imd-all", "1");
+      // Attach to the first existing wrap found inside this article
+      const wrap = article.querySelector(`.${WRAP_CLASS}`);
+      if (wrap) addCarouselAllBtn(wrap, article);
     }
   }
 
-  // Returns true when the article has a 1/N slide counter (carousel)
+  // Returns true when the article has multiple slides (carousel)
   function isCarouselArticle(article) {
+    // 1. Next-slide button is present from slide 1 whenever there are ≥2 photos
+    if (article.querySelector('button[aria-label="Next"], button[aria-label="다음"]')) return true;
+    // 2. Position-based: SVG button near the right edge of the article
+    const ar = article.getBoundingClientRect();
+    for (const btn of article.querySelectorAll("button")) {
+      if (!btn.querySelector("svg")) continue;
+      const br = btn.getBoundingClientRect();
+      if (br.width > 0 && br.width < 60 && br.left > ar.right - 80) return true;
+    }
+    // 3. 1/N counter (appears after user swipes at least once)
     for (const el of article.querySelectorAll("*")) {
       if (el.children.length === 0 && /^\s*\d{1,2}\s*\/\s*\d{1,2}\s*$/.test(el.textContent)) return true;
     }
     return false;
   }
 
-  // Append the "All ↓" button to an existing wrap
+  // Append the "All" button to an existing wrap (only once per wrap)
   function addCarouselAllBtn(wrap, article) {
+    if (wrap.querySelector(".imd-all-btn")) return; // already added
     const allBtn = document.createElement("button");
     allBtn.type = "button";
-    allBtn.className = BTN_CLASS;
+    allBtn.className = BTN_CLASS + " imd-all-btn";
     allBtn.style.cssText = "background:rgba(39,174,96,0.9);margin-left:6px;";
     allBtn.innerHTML = `${ICON_IMG_DL}<span>All</span>`;
     allBtn.addEventListener("click", (e) => {
@@ -479,12 +496,18 @@
     try {
       let url = "";
 
-      // Strategy 0: embed endpoint via post shortcode — most accurate, always returns the
-      // correct CDN URL for this specific post (avoids timestamp-matching errors)
+      // Strategy 0: embed endpoint via post shortcode.
+      // Try /p/, /reel/, /tv/ in turn — Instagram redirects most, but some reels only
+      // respond correctly to /reel/CODE/embed.
       if (video.dataset.imdCode) {
-        const postUrl = `https://www.instagram.com/p/${video.dataset.imdCode}/`;
-        const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
+        const code = video.dataset.imdCode;
+        for (const t of ["p", "reel", "tv"]) {
+          const embed = await sendMsg({
+            type: "FETCH_EMBED_VIDEOS",
+            postUrl: `https://www.instagram.com/${t}/${code}/`
+          });
+          if (embed?.videoUrls?.length) { url = embed.videoUrls[0]; break; }
+        }
       }
 
       // Strategy 1: URL stored at the moment this video started playing
