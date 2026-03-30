@@ -601,22 +601,32 @@
     try {
       let url = "";
 
-      // ── Derive shortcode at download time — simple & reliable ──
-      // DO NOT use getPostCode() or dataset.imdCode — they rely on SSR index
-      // matching which becomes stale after scrolling.
+      // ── Derive shortcode at download time ──
       let code = "";
+      let codeSource = "";
       // 1) Article permalink (feed / explore posts)
       const article = video.closest("article");
       if (article) {
         const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
-        if (a) { const m = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/); if (m) code = m[2]; }
+        if (a) { const m = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/); if (m) { code = m[2]; codeSource = "article-link"; } }
       }
-      // 2) Current page URL (reels page — URL always matches visible reel)
+      // 2) Walk up from video to find any nearby <a> with post URL
+      if (!code) {
+        let node = video.parentElement;
+        for (let i = 0; i < 15 && node && !code; i++) {
+          for (const a of node.querySelectorAll('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]')) {
+            const m = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+            if (m) { code = m[2]; codeSource = "walk-up"; break; }
+          }
+          node = node.parentElement;
+        }
+      }
+      // 3) Current page URL (single post/reel page)
       if (!code) {
         const m = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
-        if (m) code = m[2];
+        if (m) { code = m[2]; codeSource = "url"; }
       }
-      console.log("[IMD] downloadVideo code:", code, "| from:", article ? "article" : "url");
+      console.log("[IMD] downloadVideo code:", code, "| from:", codeSource);
 
       // ── Strategy 1: embed endpoint (returns proper MP4, not fMP4 fragments) ──
       if (!url && code) {
