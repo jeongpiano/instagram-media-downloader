@@ -195,8 +195,128 @@
 
       img.setAttribute(PROCESSED, "image");
       const container = findContainer(img, false);
-      if (container && !container.querySelector(`.${WRAP_CLASS}`)) attachOverlay(container, img, "image");
+      if (!container || container.querySelector(`.${WRAP_CLASS}`)) continue;
+      attachOverlay(container, img, "image");
+
+      // Carousel detection: add "All" button to first image of each carousel article
+      const article = img.closest("article");
+      if (article && !article.hasAttribute("data-imd-all") && isCarouselArticle(article)) {
+        article.setAttribute("data-imd-all", "1");
+        const wrap = container.querySelector(`.${WRAP_CLASS}`);
+        if (wrap) addCarouselAllBtn(wrap, article);
+      }
     }
+  }
+
+  // Returns true when the article has a 1/N slide counter (carousel)
+  function isCarouselArticle(article) {
+    for (const el of article.querySelectorAll("*")) {
+      if (el.children.length === 0 && /^\s*\d{1,2}\s*\/\s*\d{1,2}\s*$/.test(el.textContent)) return true;
+    }
+    return false;
+  }
+
+  // Append the "All ↓" button to an existing wrap
+  function addCarouselAllBtn(wrap, article) {
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = BTN_CLASS;
+    allBtn.style.cssText = "background:rgba(39,174,96,0.9);margin-left:6px;";
+    allBtn.innerHTML = `${ICON_IMG_DL}<span>All</span>`;
+    allBtn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      downloadAllCarousel(article, allBtn);
+    });
+    wrap.appendChild(allBtn);
+  }
+
+  // Auto-advance carousel and download all photos
+  async function downloadAllCarousel(article, btn) {
+    const prev = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `${ICON_SPINNER}<span>스캔...</span>`;
+
+    const allUrls = new Set();
+
+    function collectCurrentSlideImages() {
+      for (const img of article.querySelectorAll("img")) {
+        const srcset = img.getAttribute("srcset") || "";
+        let best = "";
+        if (srcset) {
+          const cands = srcset.split(",").map(s => {
+            const p = s.trim().split(/\s+/);
+            return { url: p[0], w: parseInt(p[1]) || 0 };
+          }).filter(c => CDN_PATTERN.test(c.url) && !c.url.includes("t51.2885-19") && !c.url.includes("s150x150"));
+          if (cands.length) { cands.sort((a, b) => b.w - a.w); best = cands[0].url; }
+        }
+        if (!best) best = img.src || img.currentSrc || "";
+        if (!CDN_PATTERN.test(best) || best.includes("t51.2885-19") || best.includes("s150x150")) continue;
+        const r = img.getBoundingClientRect();
+        if ((r.width || img.naturalWidth || 0) < 150) continue;
+        allUrls.add(best);
+      }
+    }
+
+    function findSlideBtn(next) {
+      const nextLabels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti"];
+      const prevLabels = ["Go back", "이전", "Anterior", "Zurück", "Précédent", "前へ", "上一张", "Indietro"];
+      for (const label of (next ? nextLabels : prevLabels)) {
+        const b = article.querySelector(`button[aria-label="${label}"]`);
+        if (b) return b;
+      }
+      // Position-based fallback: SVG button at right (next) or left (prev) edge of article
+      const ar = article.getBoundingClientRect();
+      for (const b of article.querySelectorAll("button")) {
+        if (!b.querySelector("svg")) continue;
+        const br = b.getBoundingClientRect();
+        if (next  && br.left > ar.right - 90 && br.width < 60) return b;
+        if (!next && br.right < ar.left + 90 && br.width < 60) return b;
+      }
+      return null;
+    }
+
+    // Go to first slide
+    let pb;
+    for (let i = 0; i < 20 && (pb = findSlideBtn(false)); i++) {
+      pb.click();
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    // Advance through all slides, collecting images
+    collectCurrentSlideImages();
+    let nb;
+    for (let i = 0; i < 30 && (nb = findSlideBtn(true)); i++) {
+      nb.click();
+      await waitForNewSlide(article, 700);
+      collectCurrentSlideImages();
+    }
+
+    const urls = [...allUrls];
+    if (!urls.length) { showStatus(btn, prev, "사진 없음", 2000); return; }
+
+    // Get post shortcode for filename
+    const aLink = article.querySelector('a[href*="/p/"],a[href*="/reel/"]');
+    const code = aLink?.href.match(/\/(p|reel)\/([\w-]+)/)?.[2]
+      || location.pathname.match(/\/(p|reel)\/([\w-]+)/)?.[2]
+      || Date.now().toString();
+
+    for (let i = 0; i < urls.length; i++) {
+      btn.innerHTML = `<span>${i + 1}/${urls.length}</span>`;
+      await sendMsg({ type: "DOWNLOAD_MEDIA", url: urls[i], filename: `instagram/${code}_${i + 1}.jpg` });
+      await new Promise(r => setTimeout(r, 200));
+    }
+    showStatus(btn, prev, `${ICON_CHECK}<span>완료 (${urls.length}장)</span>`, 5000);
+  }
+
+  // Wait until a new image appears in the article (or timeout)
+  function waitForNewSlide(article, timeout) {
+    return new Promise(resolve => {
+      const key = () => [...article.querySelectorAll("img")].map(i => i.src + (i.currentSrc || "")).join("|");
+      const initial = key();
+      const mo = new MutationObserver(() => { if (key() !== initial) { mo.disconnect(); resolve(); } });
+      mo.observe(article, { subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+      setTimeout(() => { mo.disconnect(); resolve(); }, timeout);
+    });
   }
 
   function findContainer(el, isVideo) {
@@ -359,26 +479,27 @@
     try {
       let url = "";
 
-      // Strategy 0: URL stored at the moment this video started playing (most accurate)
-      if (video.dataset.imdVideoUrl) url = video.dataset.imdVideoUrl;
-
-      // Strategy 1: video element's non-blob src
-      if (!url) url = getNonBlobSrc(video);
-
-      // Strategy 2: data attributes on parent elements
-      if (!url) url = findVideoUrlInPost(video);
-
-      // Strategy 2.5: embed endpoint using post shortcode (reliable for public posts on feed)
-      if (!url && video.dataset.imdCode) {
+      // Strategy 0: embed endpoint via post shortcode — most accurate, always returns the
+      // correct CDN URL for this specific post (avoids timestamp-matching errors)
+      if (video.dataset.imdCode) {
         const postUrl = `https://www.instagram.com/p/${video.dataset.imdCode}/`;
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
         if (embed?.videoUrls?.length) url = embed.videoUrls[0];
       }
 
-      // Strategy 3: SSR JSON scripts (matched by article position)
+      // Strategy 1: URL stored at the moment this video started playing
+      if (!url && video.dataset.imdVideoUrl) url = video.dataset.imdVideoUrl;
+
+      // Strategy 2: video element's non-blob src
+      if (!url) url = getNonBlobSrc(video);
+
+      // Strategy 3: data attributes on parent elements
+      if (!url) url = findVideoUrlInPost(video);
+
+      // Strategy 4: SSR JSON scripts (matched by article position)
       if (!url) url = findVideoUrlFromScriptsNear(video);
 
-      // Strategy 4: most-recently-captured network URL (current video most likely)
+      // Strategy 5: most-recently-captured network URL (current video most likely)
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
@@ -393,7 +514,7 @@
         }
       }
 
-      // Strategy 5: embed endpoint from current page URL
+      // Strategy 6: embed endpoint from current page URL
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });

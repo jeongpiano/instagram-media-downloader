@@ -551,8 +551,16 @@ async function autoAdvanceCarousel() {
     if (!btn) break; // Reached the last slide
 
     btn.click();
-    // Wait for the new slide image to appear and load
-    await new Promise(r => setTimeout(r, 700));
+    // Wait for slide change via MutationObserver (fast), fall back to 800ms timeout
+    await (() => {
+      return new Promise(resolve => {
+        const key = () => [...mainArticle.querySelectorAll("img")].map(img => img.src + (img.currentSrc || "")).join("|");
+        const initial = key();
+        const mo = new MutationObserver(() => { if (key() !== initial) { mo.disconnect(); resolve(); } });
+        mo.observe(mainArticle, { subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+        setTimeout(() => { mo.disconnect(); resolve(); }, 800);
+      });
+    })();
     collectImages().forEach(u => allUrls.add(u));
 
     if (!findNextBtn()) break; // Last slide — no more Next button

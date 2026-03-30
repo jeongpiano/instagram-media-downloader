@@ -174,10 +174,23 @@ async function fetchEmbed(postUrl) {
   const html = await res.text();
   const urls = [];
   let m;
+  // HTML video tags
   const re1 = /<source\s+src="([^"]+)"/g;
   while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
   const re2 = /<video[^>]+src="([^"]+)"/g;
   while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
+  // JSON video_url field (modern Instagram embed pages store URL in inline script JSON)
+  const re3 = /"video_url"\s*:\s*"(https:[^"]+)"/g;
+  while ((m = re3.exec(html))) {
+    const u = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+    if (!urls.includes(u)) urls.push(u);
+  }
+  // Direct CDN .mp4 URLs as last resort
+  const re4 = /https:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*/g;
+  while ((m = re4.exec(html))) {
+    const u = decHtml(m[0]);
+    if (!urls.includes(u)) urls.push(u);
+  }
   return urls;
 }
 
