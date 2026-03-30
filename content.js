@@ -4,8 +4,6 @@
   const PROCESSED = "data-imd";
   const WRAP_CLASS = "imd-wrap";
   const BTN_CLASS = "imd-btn";
-  const VISIBLE_CLASS = "imd-visible";
-
   // CDN domains used by Instagram
   const CDN_PATTERN = /cdninstagram\.com|fbcdn\.net|scontent[^.]*\.instagram\.com/;
 
@@ -16,7 +14,24 @@
   let scanTimer = null;
   let isNavigating = false;
 
+  injectStyles();
   init();
+
+  function injectStyles() {
+    if (document.getElementById("imd-injected-styles")) return;
+    const style = document.createElement("style");
+    style.id = "imd-injected-styles";
+    style.textContent = `
+      .imd-btn{display:inline-flex!important;align-items:center!important;gap:6px!important;padding:8px 14px!important;border:none!important;border-radius:20px!important;background:rgba(0,0,0,.78)!important;color:#fff!important;font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif!important;cursor:pointer!important;backdrop-filter:blur(10px)!important;-webkit-backdrop-filter:blur(10px)!important;box-shadow:0 2px 16px rgba(0,0,0,.35)!important;transition:background 150ms ease,transform 120ms ease!important;white-space:nowrap!important;user-select:none!important;-webkit-user-select:none!important;pointer-events:auto!important}
+      .imd-btn:hover{background:rgba(0,0,0,.92)!important;transform:scale(1.05)!important}
+      .imd-btn:active{transform:scale(.96)!important}
+      .imd-btn:disabled{cursor:wait!important;opacity:.8!important}
+      .imd-btn svg{flex-shrink:0!important}
+      @keyframes imd-spin{to{transform:rotate(360deg)}}
+      .imd-spin{animation:imd-spin .7s linear infinite!important}
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
 
   function init() {
     extractVideoUrlsFromScripts();
@@ -171,35 +186,36 @@
   }
 
   function findContainer(el, isVideo) {
-    // For videos: always use the video element itself as container
-    if (isVideo) return el;
-    // For images: walk up to find a reasonably sized container
+    // Walk up to ARTICLE or a large non-clipping container.
+    // Instagram wraps media in _aagv (overflow:hidden) inside _aagu,
+    // so we skip overflow:hidden containers to avoid clipping the button.
     let node = el.parentElement;
-    for (let i = 0; i < 8 && node; i++) {
+    let fallback = null;
+    for (let i = 0; i < 12 && node; i++) {
+      if (node.tagName === "ARTICLE") return node;
       const r = node.getBoundingClientRect();
-      if (r.width >= 150 && r.height >= 150) return node;
+      if (r.width >= 150 && r.height >= 150) {
+        if (!fallback) fallback = node;
+        // Prefer containers without overflow:hidden
+        if (getComputedStyle(node).overflow !== "hidden") return node;
+      }
       node = node.parentElement;
     }
-    return el.parentElement;
+    return fallback || el.parentElement;
   }
 
-  // ── Overlay button with JS-based hover ──
+  // ── Overlay button (always visible, top-right) ──
   function attachOverlay(container, mediaEl, mediaType) {
     const isVideo = mediaType === "video";
 
     // Make container positionable
-    if (isVideo) {
-      if (getComputedStyle(mediaEl).position === "static") {
-        mediaEl.style.position = "relative";
-      }
-    } else {
-      if (getComputedStyle(container).position === "static") {
-        container.style.position = "relative";
-      }
+    if (getComputedStyle(container).position === "static") {
+      container.style.setProperty("position", "relative", "important");
     }
 
     const wrap = document.createElement("div");
     wrap.className = WRAP_CLASS + (isVideo ? " imd-video" : "");
+    wrap.setAttribute("style", "position:absolute;right:10px;top:10px;z-index:2147483647;pointer-events:auto;opacity:1;");
 
     const label = isVideo ? "Video" : "Photo";
     const icon = isVideo ? ICON_VIDEO_DL : ICON_IMG_DL;
@@ -223,22 +239,7 @@
     wrap.appendChild(btn);
     container.appendChild(wrap);
 
-    // JS-based hover: listen on both the media element and the wrap
-    const show = () => wrap.classList.add(VISIBLE_CLASS);
-    const hide = () => {
-      setTimeout(() => {
-        if (!wrap.matches(":hover") && !mediaEl.matches(":hover")) {
-          wrap.classList.remove(VISIBLE_CLASS);
-        }
-      }, 200);
-    };
-
-    mediaEl.addEventListener("mouseenter", show);
-    mediaEl.addEventListener("mouseleave", hide);
-    wrap.addEventListener("mouseenter", show);
-    wrap.addEventListener("mouseleave", hide);
-
-    // Also watch for src changes on video
+    // Watch for src changes on video
     if (isVideo) {
       const srcObs = new MutationObserver(() => {
         const s = mediaEl.currentSrc || mediaEl.src || "";
@@ -298,34 +299,32 @@
     try {
       let url = "";
 
-      // Strategy 1: video element's non-blob src
-      url = getNonBlobSrc(video);
-
-      // Strategy 2: look in parent article/post data
-      if (!url) {
-        url = findVideoUrlInPost(video);
+      // Strategy 1: embed endpoint (returns proper MP4, not fMP4 fragments)
+      {
+        const postUrl = findPostUrlNear(video) || location.href.split("?")[0];
+        if (POST_PATTERN.test(postUrl)) {
+          const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
+          const embedUrls = embed?.videoUrls || [];
+          if (embedUrls.length) url = embedUrls[0];
+        }
       }
 
-      // Strategy 3: from SSR JSON scripts near this video
-      if (!url) {
-        url = findVideoUrlFromScriptsNear(video);
-      }
+      // Strategy 2: video element's non-blob src
+      if (!url) url = getNonBlobSrc(video);
 
-      // Strategy 4: network-captured CDN URLs
+      // Strategy 3: look in parent article/post data
+      if (!url) url = findVideoUrlInPost(video);
+
+      // Strategy 4: from SSR JSON scripts near this video
+      if (!url) url = findVideoUrlFromScriptsNear(video);
+
+      // Strategy 5: network-captured CDN URLs
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
         if (capturedUrls.length) {
           url = capturedUrls[capturedUrls.length - 1];
         }
-      }
-
-      // Strategy 5: embed endpoint fallback
-      if (!url) {
-        const postUrl = findPostUrlNear(video) || location.href.split("?")[0];
-        const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-        const embedUrls = embed?.videoUrls || [];
-        if (embedUrls.length) url = embedUrls[0];
       }
 
       if (!url) {

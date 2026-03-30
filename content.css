@@ -1,29 +1,29 @@
 /* ── Button wrapper ── */
 .imd-wrap {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  z-index: 2147483647;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 180ms ease, transform 180ms ease;
-  pointer-events: none;
+  position: absolute !important;
+  right: 10px !important;
+  bottom: 10px !important;
+  z-index: 2147483647 !important;
+  opacity: 0 !important;
+  transform: translateY(4px) !important;
+  transition: opacity 180ms ease, transform 180ms ease !important;
+  pointer-events: none !important;
 }
 
-/* Video button: top-right, always visible (on the video element itself) */
+/* Video button: top-right, always visible */
 .imd-wrap.imd-video {
   right: 10px;
   top: 10px;
   bottom: auto;
-  opacity: 1;
-  transform: translateY(0);
+  opacity: 1 !important;
+  transform: translateY(0) !important;
 }
 
 /* Fully visible on hover */
 .imd-wrap:hover,
 .imd-wrap.imd-visible {
-  opacity: 1;
-  transform: translateY(0);
+  opacity: 1 !important;
+  transform: translateY(0) !important;
 }
 
 /* The BUTTON itself is always clickable */
