@@ -496,6 +496,10 @@
       // Use { once: true } — fires once when video first plays; MutationObserver below handles src changes
       mediaEl.addEventListener("play",        storeCapturedUrl, { once: true });
       mediaEl.addEventListener("loadeddata",  storeCapturedUrl, { once: true });
+      // If video is already playing/loaded (scan ran after autoplay), capture now
+      if (!mediaEl.paused || mediaEl.readyState >= 2) {
+        storeCapturedUrl();
+      }
 
       // Watch for non-blob src changes
       const srcObs = new MutationObserver(() => {
@@ -553,34 +557,57 @@
 
     try {
       let url = "";
+      let usedStrategy = "";
+
+      // Re-derive the shortcode at download time (scan-time code may be stale
+      // after the user scrolled to a different reel).
+      const freshCode = getPostCode(video);
+      const code = freshCode || video.dataset.imdCode || "";
+      if (freshCode && freshCode !== video.dataset.imdCode) {
+        video.dataset.imdCode = freshCode; // update stale value
+      }
+      console.log("[IMD] downloadVideo code=" + code + " freshCode=" + freshCode + " oldCode=" + (video.dataset.imdCode||""));
 
       // Strategy 0: embed endpoint via post shortcode.
-      // Try /p/, /reel/, /tv/ in turn — Instagram redirects most, but some reels only
-      // respond correctly to /reel/CODE/embed.
-      if (video.dataset.imdCode) {
-        const code = video.dataset.imdCode;
-        for (const t of ["p", "reel", "tv"]) {
+      if (code) {
+        for (const t of ["reel", "p", "tv"]) {
           const embed = await sendMsg({
             type: "FETCH_EMBED_VIDEOS",
             postUrl: `https://www.instagram.com/${t}/${code}/`
           });
-          if (embed?.videoUrls?.length) { url = embed.videoUrls[0]; break; }
+          if (embed?.videoUrls?.length) {
+            url = embed.videoUrls[0];
+            usedStrategy = `embed /${t}/${code}/`;
+            break;
+          }
         }
       }
 
       // Strategy 1: URL stored at the moment this video started playing
-      if (!url && video.dataset.imdVideoUrl) url = video.dataset.imdVideoUrl;
+      if (!url && video.dataset.imdVideoUrl) {
+        url = video.dataset.imdVideoUrl;
+        usedStrategy = "imdVideoUrl";
+      }
 
       // Strategy 2: video element's non-blob src
-      if (!url) url = getNonBlobSrc(video);
+      if (!url) {
+        url = getNonBlobSrc(video);
+        if (url) usedStrategy = "non-blob src";
+      }
 
       // Strategy 3: data attributes on parent elements
-      if (!url) url = findVideoUrlInPost(video);
+      if (!url) {
+        url = findVideoUrlInPost(video);
+        if (url) usedStrategy = "data-attr";
+      }
 
-      // Strategy 4: SSR JSON scripts (matched by article position)
-      if (!url) url = findVideoUrlFromScriptsNear(video);
+      // Strategy 4: SSR JSON — get the CDN URL directly (skip embed)
+      if (!url) {
+        url = findVideoUrlFromScriptsNear(video);
+        if (url) usedStrategy = "SSR JSON direct URL";
+      }
 
-      // Strategy 5: most-recently-captured network URL (current video most likely)
+      // Strategy 5: most-recently-captured network URL
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
@@ -589,9 +616,21 @@
             !u.includes("bytestart") && !u.includes("byteend") &&
             !u.includes("-seg-") && !u.includes("/range/")
           );
-          url = fullUrls.length
-            ? fullUrls[fullUrls.length - 1]
-            : capturedUrls[capturedUrls.length - 1];
+          if (fullUrls.length) {
+            url = fullUrls[fullUrls.length - 1];
+            usedStrategy = "captured full URL";
+          } else {
+            // Strip range params to get base URL
+            const withRange = capturedUrls.filter(u =>
+              (u.includes("cdninstagram") || u.includes("fbcdn"))
+            );
+            if (withRange.length) {
+              url = withRange[withRange.length - 1]
+                .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
+                .replace(/[?&]$/, "");
+              usedStrategy = "captured range-stripped URL";
+            }
+          }
         }
       }
 
@@ -599,8 +638,13 @@
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
+        if (embed?.videoUrls?.length) {
+          url = embed.videoUrls[0];
+          usedStrategy = "embed from page URL";
+        }
       }
+
+      console.log("[IMD] downloadVideo strategy=" + usedStrategy + " url=" + (url?.slice(0, 80) || "NONE"));
 
       if (!url) {
         showStatus(btn, prev, "No video found", 2500);
@@ -615,7 +659,7 @@
         showStatus(btn, prev, "<span>Failed</span>", 2500);
       }
     } catch (err) {
-      console.error("[IMD]", err);
+      console.error("[IMD] downloadVideo error:", err);
       showStatus(btn, prev, "<span>Error</span>", 2000);
     }
   }
