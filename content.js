@@ -279,15 +279,26 @@
     // For videos: capture CDN URL at the moment the video starts playing
     if (isVideo) {
       const storeCapturedUrl = () => {
-        if (mediaEl.dataset.imdVideoUrl) return; // already stored
+        const playTime = Date.now();
         setTimeout(async () => {
           const c = await sendMsg({ type: "GET_CAPTURED_URLS" });
+          // Use timestamp proximity: pick the full video URL captured closest to this play event
+          const entries = (c?.urlEntries || []).filter(e =>
+            !e.url.includes("bytestart") && !e.url.includes("-seg-") && !e.url.includes("/range/")
+          );
+          if (entries.length) {
+            entries.sort((a, b) => Math.abs(a.ts - playTime) - Math.abs(b.ts - playTime));
+            mediaEl.dataset.imdVideoUrl = entries[0].url;
+            return;
+          }
+          // Fallback: last captured full URL
           const full = (c?.urls || []).filter(u =>
             !u.includes("bytestart") && !u.includes("-seg-") && !u.includes("/range/")
           );
           if (full.length) mediaEl.dataset.imdVideoUrl = full[full.length - 1];
         }, 400); // brief wait for webRequest to record the URL
       };
+      // Use { once: true } — fires once when video first plays; MutationObserver below handles src changes
       mediaEl.addEventListener("play",        storeCapturedUrl, { once: true });
       mediaEl.addEventListener("loadeddata",  storeCapturedUrl, { once: true });
 

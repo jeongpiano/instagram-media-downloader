@@ -72,6 +72,8 @@ const handlers = {
     respond({
       ok: true,
       urls: tab ? [...tab.videos.keys()] : [],
+      // urlEntries: [{url, ts}] — used by content.js to match URLs to specific video play events
+      urlEntries: tab ? [...tab.videos.entries()].map(([url, ts]) => ({ url, ts })) : [],
       imageUrls: tab ? [...tab.images.keys()] : [],
       thumbnails: tab?.thumbnails || {}
     });

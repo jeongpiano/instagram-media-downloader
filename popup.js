@@ -352,15 +352,22 @@ function scanPage() {
     let src = v.currentSrc || v.src || "";
     let thumb = v.poster || "";
     const sourceSrc = v.querySelector("source")?.src || "";
+    const code = extractCode(v);
 
-    // Non-blob source
-    if (src && !src.startsWith("blob:")) {
+    // Strategy 0: content.js stored the CDN URL when this video actually played (most accurate)
+    if (v.dataset.imdVideoUrl) {
+      src = v.dataset.imdVideoUrl;
       videos.push(src);
-      shortcodes[src] = extractCode(v);
+      shortcodes[src] = code;
+      if (thumb) thumbnails[src] = thumb;
+    } else if (src && !src.startsWith("blob:")) {
+      // Non-blob src attribute
+      videos.push(src);
+      shortcodes[src] = code;
       if (thumb) thumbnails[src] = thumb;
     } else if (sourceSrc && !sourceSrc.startsWith("blob:")) {
       videos.push(sourceSrc);
-      shortcodes[sourceSrc] = extractCode(v);
+      shortcodes[sourceSrc] = code;
       if (thumb) thumbnails[sourceSrc] = thumb;
       src = sourceSrc;
     } else {
@@ -368,13 +375,12 @@ function scanPage() {
       if (ssrVideoIdx < ssrVideos.length) {
         const ssr = ssrVideos[ssrVideoIdx];
         videos.push(ssr.url);
-        shortcodes[ssr.url] = extractCode(v);
+        shortcodes[ssr.url] = code;
         src = ssr.url;
         if (ssr.thumb) thumb = ssr.thumb;
         ssrVideoIdx++;
       } else {
         // No SSR match — store placeholder so embed fallback can fill in later
-        const code = extractCode(v);
         if (code) {
           const placeholder = `__embed__${code}`;
           videos.push(placeholder);
