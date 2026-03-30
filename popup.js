@@ -44,6 +44,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       const postUrl = tab.url.split("?")[0];
       const r = await chrome.runtime.sendMessage({ type: "FETCH_GRAPHQL_MEDIA", postUrl });
       if (r?.url) videoSet.add(r.url);
+      // FIX #4: Handle carousel response
+      if (r?.carousel) {
+        for (const item of r.carousel) {
+          if (item.url) {
+            if (item.url.includes(".mp4") || item.url.includes("/v/")) videoSet.add(item.url);
+            else imageSet.add(item.url);
+          }
+        }
+      }
     } catch {}
   }
 
@@ -238,10 +247,15 @@ function scanPage() {
   function dig(obj, d) {
     if (d > 30 || !obj || typeof obj !== "object") return;
     if (Array.isArray(obj.video_versions)) {
-      const best = obj.video_versions[obj.video_versions.length - 1];
+      const best = obj.video_versions.reduce((a, b) =>
+        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
+        obj.video_versions[0]
+      );
       if (best?.url) {
         videos.push(best.url);
-        if (best.thumbnail_url) thumbnails[best.url] = best.thumbnail_url;
+        // FIX #6: Use image_versions2 for thumbnail, not best.thumbnail_url
+        const thumb = obj.image_versions2?.candidates?.[0]?.url || obj.thumbnail_url || null;
+        if (thumb) thumbnails[best.url] = thumb;
       }
       return;
     }

@@ -145,7 +145,8 @@ async function fetchGraphQLMedia(postUrl) {
   const shortcode = extractShortcode(postUrl);
   if (!shortcode) throw new Error("No shortcode found");
 
-  const graphqlUrl = `https://www.instagram.com/api/v1/media/${shortcode}/info/`;
+  // FIX #5: Use working GraphQL endpoint (v1/media was deprecated)
+  const graphqlUrl = `https://www.instagram.com/graphql/query/?query_hash=b3055c01b4b222b8a47dc12b090e4e64&variables=${encodeURIComponent(JSON.stringify({ shortcode }))}`;
 
   const resp = await fetch(graphqlUrl, {
     headers: {
@@ -291,8 +292,12 @@ async function fetchEmbedVideos(postUrl) {
   throw new Error("All embed methods failed");
 }
 
+// FIX #8: Complete HTML entity decode
 function decHtml(s) {
-  return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
 }
 
 // ── Download: direct chrome.downloads (no fetch→blob) ──

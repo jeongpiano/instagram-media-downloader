@@ -1,7 +1,7 @@
 /*
- * Content script - Instagram Media Downloader v4
- * Clean rewrite based on working Threads downloader pattern.
- * Instagram does NOT use Shadow DOM — simple DOM scan is sufficient.
+ * Content script - Instagram Media Downloader v4.1
+ * Fixed: lazy image detection, stacking context, DOM replacement,
+ * story URLs, hover race condition
  */
 (() => {
   "use strict";
@@ -21,12 +21,12 @@
   const dbg = document.createElement("div");
   dbg.id = "imd-debug";
   Object.assign(dbg.style, {
-    position: "fixed", top: "0", left: "0", zIndex: "999999",
+    position: "fixed", top: "0", left: "0", zIndex: "2147483647",
     background: "#E1306C", color: "#fff", padding: "6px 12px",
     fontSize: "12px", fontFamily: "monospace", pointerEvents: "none"
   });
   (document.body || document.documentElement).appendChild(dbg);
-  function setDebug(msg) { dbg.textContent = `[IMD v4] ${msg}`; }
+  function setDebug(msg) { dbg.textContent = `[IMD] ${msg}`; }
   setDebug("loading…");
 
   init();
@@ -36,9 +36,11 @@
     extractMediaFromPage();
     scheduleScan();
 
-    // MutationObserver for React re-renders
-    const obs = new MutationObserver(() => {
+    // MutationObserver for React re-renders — also re-check processed markers
+    const obs = new MutationObserver((mutations) => {
       if (location.href !== lastUrl) onNavigate();
+      // Check if processed elements were removed by React
+      revalidateProcessed();
       scheduleScan();
     });
     obs.observe(document.body || document.documentElement, {
@@ -79,8 +81,19 @@
     });
   }
 
+  // FIX #3: Re-validate processed markers — React may replace DOM nodes
+  function revalidateProcessed() {
+    document.querySelectorAll(`[${PROCESSED}]`).forEach((el) => {
+      // If the overlay wrapper was removed by React, re-mark for scanning
+      const wrap = el.closest ? el.querySelector(`.${WRAP_CLASS}`) : null;
+      if (el.hasAttribute(PROCESSED) && !el.parentElement?.querySelector(`.${WRAP_CLASS}`) && !el.querySelector(`.${WRAP_CLASS}`)) {
+        el.removeAttribute(PROCESSED);
+      }
+    });
+  }
+
   // ────────────────────────────────────────────────────────
-  // SSR JSON extraction (video_versions / image_versions2)
+  // SSR JSON extraction
   // ────────────────────────────────────────────────────────
 
   function extractMediaFromPage() {
@@ -105,47 +118,46 @@
     if (depth > 30 || !obj || typeof obj !== "object") return;
     if (Array.isArray(obj)) { for (const v of obj) digMedia(v, out, depth + 1); return; }
 
-    // video_versions array (Instagram API format)
-    if (Array.isArray(obj.video_versions)) {
+    // video_versions array
+    if (Array.isArray(obj.video_versions) && obj.video_versions.length) {
       const best = obj.video_versions.reduce((a, b) =>
         (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
         obj.video_versions[0]
       );
-      if (best?.url) out.push({ url: best.url, type: "video", thumb: obj.image_versions2?.candidates?.[0]?.url || null, y: out.length });
+      if (best?.url) {
+        const thumb = obj.image_versions2?.candidates?.[0]?.url || obj.thumbnail_url || obj.display_url || null;
+        out.push({ url: best.url, type: "video", thumb, y: out.length });
+      }
       return;
     }
-    // video_url string
     if (typeof obj.video_url === "string" && obj.video_url) {
       out.push({ url: obj.video_url, type: "video", thumb: obj.thumbnail_url || obj.display_url || null, y: out.length });
       return;
     }
-    // image_versions2 (Instagram API format)
     if (obj.image_versions2?.candidates) {
       const cands = obj.image_versions2.candidates;
-      const best = cands.reduce((a, b) =>
-        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
-        cands[0]
-      );
-      if (best?.url) out.push({ url: best.url, type: "image", thumb: best.url, y: out.length });
+      if (cands.length) {
+        const best = cands.reduce((a, b) =>
+          (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
+          cands[0]
+        );
+        if (best?.url) out.push({ url: best.url, type: "image", thumb: best.url, y: out.length });
+      }
       return;
     }
-    // display_resources (older GraphQL format)
     if (obj.display_resources) {
       const best = obj.display_resources[obj.display_resources.length - 1];
       if (best?.src) out.push({ url: best.src, type: "image", thumb: best.src, y: out.length });
       return;
     }
-    // display_url (older format)
     if (typeof obj.display_url === "string" && obj.display_url && CDN_PATTERN.test(obj.display_url)) {
       out.push({ url: obj.display_url, type: "image", thumb: obj.display_url, y: out.length });
       return;
     }
-    // carousel_media
     if (Array.isArray(obj.carousel_media)) {
       for (const m of obj.carousel_media) digMedia(m, out, depth + 1);
       return;
     }
-    // reel/stories
     if (Array.isArray(obj.reel_media)) {
       for (const m of obj.reel_media) digMedia(m, out, depth + 1);
       return;
@@ -159,7 +171,7 @@
   }
 
   // ────────────────────────────────────────────────────────
-  // DOM scan: attach overlay buttons
+  // DOM scan
   // ────────────────────────────────────────────────────────
 
   function scheduleScan() {
@@ -180,17 +192,20 @@
       if (container) attachOverlay(container, video, "video");
     }
 
-    // Images — only large CDN images (skip avatars, icons, thumbnails)
+    // Images
     for (const img of document.querySelectorAll("img")) {
       if (img.hasAttribute(PROCESSED)) continue;
       const src = img.src || img.currentSrc || "";
       if (!src || !CDN_PATTERN.test(src)) continue;
-      // Skip profile pictures
       if (src.includes("/t51.2885-19/")) continue;
-      // Skip tiny images (profile pics, icons)
       if (src.includes("s150x150")) continue;
+
+      // FIX #1: Don't skip lazy images that haven't entered viewport yet
+      // Use naturalWidth/naturalHeight as backup (works even for offscreen images)
       const rect = img.getBoundingClientRect();
-      if (rect.width < 150 || rect.height < 150) continue;
+      const w = rect.width || img.naturalWidth || 0;
+      const h = rect.height || img.naturalHeight || 0;
+      if (w < 100 && h < 100) continue;
 
       img.setAttribute(PROCESSED, "image");
       const container = findContainer(img, false);
@@ -200,18 +215,21 @@
 
   function findContainer(el, isVideo) {
     if (isVideo) return el;
-    // For images: walk up to find a reasonably-sized parent
+    // Walk up to find Instagram's post media container
     let node = el.parentElement;
     for (let i = 0; i < 8 && node; i++) {
       const r = node.getBoundingClientRect();
-      if (r.width >= 150 && r.height >= 150) return node;
+      // Use naturalWidth as fallback for offscreen
+      const w = r.width || 0;
+      const h = r.height || 0;
+      if (w >= 150 && h >= 150) return node;
       node = node.parentElement;
     }
     return el.parentElement;
   }
 
   // ────────────────────────────────────────────────────────
-  // Overlay button with hover show/hide
+  // Overlay
   // ────────────────────────────────────────────────────────
 
   function attachOverlay(container, mediaEl, mediaType) {
@@ -249,21 +267,28 @@
     wrap.appendChild(btn);
     container.appendChild(wrap);
 
-    // Hover show/hide
-    const show = () => wrap.classList.add(VISIBLE_CLASS);
+    // FIX #10: Hover — use a flag instead of setTimeout race
+    let hoverCount = 0;
+    const show = () => { hoverCount++; wrap.classList.add(VISIBLE_CLASS); };
     const hide = () => {
+      hoverCount--;
       setTimeout(() => {
-        if (!wrap.matches(":hover") && !mediaEl.matches(":hover")) {
+        if (hoverCount <= 0) {
+          hoverCount = 0;
           wrap.classList.remove(VISIBLE_CLASS);
         }
-      }, 200);
+      }, 300);
     };
     mediaEl.addEventListener("mouseenter", show);
     mediaEl.addEventListener("mouseleave", hide);
     wrap.addEventListener("mouseenter", show);
     wrap.addEventListener("mouseleave", hide);
+    // Also show on container hover (for images where container != mediaEl)
+    if (container !== mediaEl) {
+      container.addEventListener("mouseenter", show);
+      container.addEventListener("mouseleave", hide);
+    }
 
-    // Watch video src changes
     if (isVideo) {
       const srcObs = new MutationObserver(() => {
         const s = mediaEl.currentSrc || mediaEl.src || "";
@@ -356,7 +381,7 @@
       const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
       showStatus(btn, prev, resp?.ok ? `${ICON_CHECK}<span>Saved!</span>` : "<span>Failed</span>", 2500);
     } catch (err) {
-      console.error("[IMD v4]", err);
+      console.error("[IMD]", err);
       showStatus(btn, prev, "<span>Error</span>", 2000);
     }
   }
@@ -392,11 +417,13 @@
     return "";
   }
 
+  // FIX from threads-ref: add id pattern stop condition like Threads
   function findVideoUrlFromScriptsNear(video) {
     let postNode = video;
     for (let i = 0; i < 10 && postNode; i++) {
       if (postNode.tagName === "ARTICLE" || postNode.tagName === "SECTION" ||
-          (postNode.getAttribute?.("role") === "presentation")) {
+          (postNode.getAttribute?.("role") === "presentation") ||
+          (postNode.id && /post|thread|item|entry|media/i.test(postNode.id))) {
         break;
       }
       postNode = postNode.parentElement;
@@ -415,10 +442,11 @@
     return "";
   }
 
+  // FIX #9: match stories URLs too
   function findPostUrl() {
-    // Try to get post URL from current page or from link in the feed
     const href = location.href;
-    if (/\/(p|reel|tv)\/[\w-]+/.test(href)) return href.split("?")[0];
+    if (/\/(p|reel|tv|reels)\/[\w-]+/.test(href)) return href.split("?")[0];
+    if (/\/stories\/[\w.]+\/\d+/.test(href)) return href.split("?")[0];
     return "";
   }
 

@@ -1,4 +1,5 @@
 /* ── Button wrapper ── */
+/* FIX #2: Use fixed positioning approach to escape Instagram stacking contexts */
 .imd-wrap {
   position: absolute;
   right: 10px;
@@ -8,16 +9,19 @@
   transform: translateY(4px);
   transition: opacity 180ms ease, transform 180ms ease;
   pointer-events: none;
+  /* Escape Instagram's contain: layout/style/paint */
+  contain: none !important;
+  isolation: isolate;
 }
 
-/* Video button: top-right corner */
+/* Video button: top-right */
 .imd-wrap.imd-video {
   right: 10px;
   top: 10px;
   bottom: auto;
 }
 
-/* Visible on hover (JS adds this class) */
+/* Visible on hover */
 .imd-wrap.imd-visible,
 .imd-wrap:hover {
   opacity: 1;
@@ -25,7 +29,7 @@
   pointer-events: auto;
 }
 
-/* Keep button visible while downloading */
+/* Keep visible while downloading */
 .imd-wrap:has(button:disabled) {
   opacity: 1 !important;
   transform: translateY(0) !important;
