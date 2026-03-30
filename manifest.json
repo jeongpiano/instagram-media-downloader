@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Instagram Media Downloader",
-  "version": "3.0.0",
-  "description": "Download photos, videos, Reels, and Stories from Instagram with one click. v3: Shadow DOM piercing + Instagram web component support.",
+  "version": "4.0.0",
+  "description": "Download photos, videos, Reels, and Stories from Instagram with hover buttons.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

@@ -1,9 +1,9 @@
 /*
- * Background service worker - Instagram Media Downloader v2 (Fixed)
+ * Background service worker - Instagram Media Downloader v4
  * - Captures CDN URLs from webRequest
- * - Downloads via chrome.downloads (Referer handled via fetch → blob)
- * - HLS m3u8 → MP4 extraction
+ * - Downloads via chrome.downloads (direct URL, no fetch→blob)
  * - Instagram GraphQL API fallback
+ * - Embed page fallback
  */
 
 const capturedMedia = new Map(); // tabId -> { videos: Map<url,ts>, images: Map<url,ts>, thumbnails: {} }
@@ -82,27 +82,25 @@ const handlers = {
     });
   },
 
-  // FIX 4: Instagram GraphQL API fallback (new embed alternative)
-  async FETCH_GRAPHQL_MEDIA(msg, sendResponse) {
+  async FETCH_GRAPHQL_MEDIA(msg, _sender, respond) {
     try {
       const result = await fetchGraphQLMedia(msg.postUrl);
-      sendResponse(result);
+      respond(result);
     } catch (e) {
-      sendResponse({ ok: false, error: e.message });
+      respond({ ok: false, error: e.message });
     }
   },
 
-  // FIX 2: HLS m3u8 manifest → MP4 extraction
-  async EXTRACT_HLS(msg, sendResponse) {
+  async EXTRACT_HLS(msg, _sender, respond) {
     try {
-      const mp4Url = await extractHLStoMP4(msg.manifestUrl, msg.postUrl);
-      sendResponse({ ok: true, url: mp4Url });
+      const mp4Url = await extractHLStoMP4(msg.manifestUrl);
+      respond({ ok: true, url: mp4Url });
     } catch (e) {
-      sendResponse({ ok: false, error: e.message });
+      respond({ ok: false, error: e.message });
     }
   },
 
-  async FETCH_EMBED_VIDEOS(msg, _s, respond) {
+  async FETCH_EMBED_VIDEOS(msg, _sender, respond) {
     try {
       respond({ ok: true, videoUrls: await fetchEmbedVideos(msg.postUrl) });
     } catch (e) {
@@ -110,7 +108,7 @@ const handlers = {
     }
   },
 
-  async DOWNLOAD_MEDIA(msg, _s, respond) {
+  async DOWNLOAD_MEDIA(msg, _sender, respond) {
     try {
       await download(msg.url, msg.filename);
       respond({ ok: true });
@@ -140,11 +138,10 @@ const handlers = {
   }
 };
 
-// ── FIX 4: Instagram GraphQL API fallback ──
+// ── Instagram GraphQL API fallback ──
 async function fetchGraphQLMedia(postUrl) {
   if (!postUrl) throw new Error("No URL");
 
-  // Extract shortcode from URL
   const shortcode = extractShortcode(postUrl);
   if (!shortcode) throw new Error("No shortcode found");
 
@@ -161,15 +158,12 @@ async function fetchGraphQLMedia(postUrl) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
   const data = await resp.json();
-  const media = digGraphQLData(data);
-
-  return media;
+  return digGraphQLData(data);
 }
 
 function digGraphQLData(obj) {
-  if (!obj || typeof obj !== "object") return {};
+  if (!obj || typeof obj !== "object") return { ok: false };
 
-  // Navigate: data.items[].media (Instagram internal API structure)
   const items = obj?.items || obj?.data?.items || obj?.data?.media || [];
   const arr = Array.isArray(items) ? items : [items];
 
@@ -177,13 +171,30 @@ function digGraphQLData(obj) {
     const media = item?.media || item;
     if (!media) continue;
 
+    // Carousel
+    if (Array.isArray(media.carousel_media)) {
+      const results = [];
+      for (const cm of media.carousel_media) {
+        const r = digGraphQLData({ items: [cm] });
+        if (r.ok) results.push(r);
+      }
+      if (results.length) return { ok: true, carousel: results };
+    }
+
     if (media.video_versions) {
-      const best = media.video_versions[media.video_versions.length - 1];
-      if (best?.url) return { ok: true, url: best.url, thumb: media.thumbnail?.url || null };
+      const best = media.video_versions.reduce((a, b) =>
+        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
+        media.video_versions[0]
+      );
+      if (best?.url) return { ok: true, url: best.url, thumb: media.image_versions2?.candidates?.[0]?.url || null };
     }
     if (media.video_url) return { ok: true, url: media.video_url, thumb: media.thumbnail?.url || null };
     if (media.image_versions2?.candidates) {
-      const best = media.image_versions2.candidates[media.image_versions2.candidates.length - 1];
+      const cands = media.image_versions2.candidates;
+      const best = cands.reduce((a, b) =>
+        (b.width || 0) * (b.height || 0) > (a.width || 0) * (a.height || 0) ? b : a,
+        cands[0]
+      );
       return { ok: true, url: best?.url, thumb: best?.url };
     }
   }
@@ -192,7 +203,6 @@ function digGraphQLData(obj) {
 }
 
 function extractShortcode(url) {
-  // Instagram URL patterns: /p/CODE/, /reel/CODE/, /tv/CODE/, /reels/CODE/
   const patterns = ["/p/", "/reel/", "/tv/", "/reels/", "/media/"];
   for (const p of patterns) {
     const idx = url.indexOf(p);
@@ -204,115 +214,79 @@ function extractShortcode(url) {
   return null;
 }
 
-// ── FIX 2: HLS m3u8 → MP4 segment extraction ──
-async function extractHLStoMP4(manifestUrl, postUrl) {
+// ── HLS m3u8 → MP4 extraction ──
+async function extractHLStoMP4(manifestUrl) {
   if (!manifestUrl) throw new Error("No manifest URL");
 
-  const referer = "https://www.instagram.com/";
-
-  // Fetch the m3u8 manifest
-  const manifestResp = await fetch(manifestUrl, {
-    headers: { "Referer": referer, "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" }
+  const resp = await fetch(manifestUrl, {
+    headers: { "Referer": "https://www.instagram.com/" }
   });
-  if (!manifestResp.ok) throw new Error(`Manifest HTTP ${manifestResp.status}`);
+  if (!resp.ok) throw new Error(`Manifest HTTP ${resp.status}`);
 
-  const manifestText = await manifestResp.text();
-  const lines = manifestText.split("\n").map((l) => l.trim());
+  const text = await resp.text();
+  const lines = text.split("\n").map((l) => l.trim());
 
-  // Determine base URL for resolving relative segment URLs
-  const baseUrl = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
-
-  // Find MP4 video segments (not AUDIO, not I-frame only)
-  const segments = [];
-  let currentVariant = null;
-
-  for (const line of lines) {
-    if (line.startsWith("#EXT-X-STREAM-INF")) {
-      // Variant stream — skip audio-only
-      currentVariant = line.includes("VIDEO=") || line.includes("CODECS=\"avc") ? "video" : null;
-    } else if (line.startsWith("#")) {
-      currentVariant = null; // reset on other tags
-    } else if (line && currentVariant === "video" && (line.endsWith(".ts") || line.includes(".ts"))) {
-      // TS segment — resolve relative URL
-      const segUrl = line.startsWith("http") ? line : baseUrl + line;
-      segments.push(segUrl);
-    } else if (line && (line.endsWith(".m3u8") || line.includes(".m3u8"))) {
-      // Nested playlist — recurse (simplified: skip nested for now)
-    }
-  }
-
-  // If TS segments found, fetch the first few to estimate; use best MP4 if available
-  // For simplicity: look for EXT-X-MAP (init segment) + first TS as representative MP4 URL
-  // Instagram HLS typically stores MP4 in highest quality variant
-  const mp4Init = lines.find((l) => l.includes(".mp4") || l.includes("EXT-X-MAP"));
-  const mp4Seg = segments[Math.floor(segments.length * 0.7)]; // ~70% position (usually best quality)
-
-  if (mp4Seg) return mp4Seg;
-
-  // Fallback: look for .mp4 directly in manifest lines
+  // Look for .mp4 directly
   const mp4Line = lines.find((l) => l.includes(".mp4") && l.startsWith("http"));
   if (mp4Line) return mp4Line;
+
+  // Look for highest bandwidth variant playlist
+  const baseUrl = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
+  const variants = [];
+  let bandwidth = 0;
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-STREAM-INF")) {
+      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+      bandwidth = bwMatch ? parseInt(bwMatch[1]) : 0;
+    } else if (line && !line.startsWith("#") && bandwidth > 0) {
+      variants.push({ url: line.startsWith("http") ? line : baseUrl + line, bandwidth });
+      bandwidth = 0;
+    }
+  }
+  if (variants.length) {
+    variants.sort((a, b) => b.bandwidth - a.bandwidth);
+    return variants[0].url;
+  }
 
   throw new Error("No extractable MP4 from HLS manifest");
 }
 
-// ── FIX 4 updated: fetchEmbedVideos with updated endpoint ──
+// ── Embed page fallback ──
 async function fetchEmbedVideos(postUrl) {
   if (!postUrl) throw new Error("No URL");
 
-  // Try oEmbed API first (public, no auth needed)
+  // Try oEmbed API first
   try {
     const oembedUrl = `https://graph.facebook.com/v18.0/instagram_oembed?url=${encodeURIComponent(postUrl)}&maxwidth=1080`;
-    const resp = await fetch(oembedUrl, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
+    const resp = await fetch(oembedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (resp.ok) {
       const data = await resp.json();
       if (data.html) {
-        // Extract video src from oEmbed HTML
-        const srcMatch = data.html.match(/src="([^"]+)"/);
         const mp4Match = data.html.match(/(https?:\/\/[^\s"']+\.mp4[^\s"']*)/);
         if (mp4Match) return [mp4Match[1]];
-        if (srcMatch) {
-          // Fetch the embed page to get actual video URL
-          const embedResp = await fetch(srcMatch[1], {
-            headers: { "User-Agent": "Mozilla/5.0" }
-          });
-          if (embedResp.ok) {
-            const html = await embedResp.text();
-            const mp4s = [...html.matchAll(/(https?:\/\/[^\s"']+\.mp4[^\s"']*)/g)].map((m) => m[1]);
-            if (mp4s.length) return mp4s;
-          }
-        }
       }
     }
-  } catch { /* try next fallback */ }
+  } catch { /* try next */ }
 
-  // Try direct /embed page (Instagram may still support it for some posts)
-  const embedUrl = postUrl.replace(/\/(media)?\s*$/, "").replace(/\/$/, "") + "/embed/";
+  // Direct /embed page
+  const embedUrl = postUrl.replace(/(\/media)?\s*$/, "").replace(/\/$/, "") + "/embed/";
   try {
     const resp = await fetch(embedUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
     });
     if (resp.ok) {
       const html = await resp.text();
       const urls = [];
       let m;
-
       const re1 = /<source\s+src="([^"]+)"/g;
       while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
-
       const re2 = /<video[^>]+src="([^"]+)"/g;
       while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
-
       const re3 = /(https?:\/\/[^\s"']+\.mp4[^\s"']*)/g;
       while ((m = re3.exec(html))) { const u = m[1]; if (!urls.includes(u)) urls.push(u); }
-
       if (urls.length) return urls;
     }
-  } catch { /* final fallback failed */ }
+  } catch { /* failed */ }
 
   throw new Error("All embed methods failed");
 }
@@ -321,22 +295,15 @@ function decHtml(s) {
   return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
 }
 
-// ── Download: fetch -> blob -> downloads API (Referer via fetch) ──
-async function download(url, filename) {
+// ── Download: direct chrome.downloads (no fetch→blob) ──
+function download(url, filename) {
   if (!url || url.startsWith("blob:")) {
-    throw new Error("Cannot download blob URL");
+    return Promise.reject(new Error("Cannot download blob URL"));
   }
-  // Instagram CDN requires Referer
-  const resp = await fetch(url, {
-    headers: { "Referer": "https://www.instagram.com/" }
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const blob = await resp.blob();
-  const blobUrl = URL.createObjectURL(blob);
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
       {
-        url: blobUrl,
+        url,
         filename: sanitize(filename || `instagram/${Date.now()}.mp4`),
         saveAs: false,
         conflictAction: "uniquify"

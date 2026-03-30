@@ -10,24 +10,18 @@
   pointer-events: none;
 }
 
-/* Video button: top-right corner, always visible */
+/* Video button: top-right corner */
 .imd-wrap.imd-video {
   right: 10px;
   top: 10px;
   bottom: auto;
-  opacity: 1;
-  transform: translateY(0);
 }
 
-/* Fully visible on hover */
-.imd-wrap:hover,
-.imd-wrap.imd-visible {
+/* Visible on hover (JS adds this class) */
+.imd-wrap.imd-visible,
+.imd-wrap:hover {
   opacity: 1;
   transform: translateY(0);
-}
-
-/* The button itself is always clickable */
-.imd-wrap .imd-btn {
   pointer-events: auto;
 }
 
@@ -35,6 +29,7 @@
 .imd-wrap:has(button:disabled) {
   opacity: 1 !important;
   transform: translateY(0) !important;
+  pointer-events: auto !important;
 }
 
 /* ── Download button ── */
@@ -56,6 +51,7 @@
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
+  pointer-events: auto;
 }
 
 .imd-btn:hover {
