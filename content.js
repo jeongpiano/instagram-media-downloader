@@ -782,9 +782,12 @@
 
   function sendMsg(msg) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(msg, (r) => {
-        resolve(chrome.runtime.lastError ? null : r);
-      });
+      try {
+        if (!chrome.runtime?.id) { resolve(null); return; }
+        chrome.runtime.sendMessage(msg, (r) => {
+          resolve(chrome.runtime.lastError ? null : r);
+        });
+      } catch { resolve(null); }
     });
   }
 
