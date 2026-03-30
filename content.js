@@ -203,14 +203,14 @@
       attachOverlay(container, img, "image");
     }
 
-    // ── Carousel "All" button — separate pass so it runs even for already-processed images ──
+    // ── Carousel "All" button — add to EVERY wrap inside carousel articles ──
     for (const article of document.querySelectorAll("article")) {
-      if (article.hasAttribute("data-imd-all")) continue;
       if (!isCarouselArticle(article)) continue;
       article.setAttribute("data-imd-all", "1");
-      // Attach to the first existing wrap found inside this article
-      const wrap = article.querySelector(`.${WRAP_CLASS}`);
-      if (wrap) addCarouselAllBtn(wrap, article);
+      // Add "All" to every image wrap in this article (covers all slides)
+      for (const wrap of article.querySelectorAll(`.${WRAP_CLASS}`)) {
+        addCarouselAllBtn(wrap, article);
+      }
     }
   }
 
