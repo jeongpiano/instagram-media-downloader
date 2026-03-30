@@ -580,10 +580,22 @@
     try {
       let url = "";
 
-      // Re-derive the shortcode at download time (scan-time code may be stale).
-      const freshCode = getPostCode(video);
-      const code = freshCode || video.dataset.imdCode || "";
-      if (freshCode) video.dataset.imdCode = freshCode;
+      // ── Derive shortcode at download time — simple & reliable ──
+      // DO NOT use getPostCode() or dataset.imdCode — they rely on SSR index
+      // matching which becomes stale after scrolling.
+      let code = "";
+      // 1) Article permalink (feed / explore posts)
+      const article = video.closest("article");
+      if (article) {
+        const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
+        if (a) { const m = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/); if (m) code = m[2]; }
+      }
+      // 2) Current page URL (reels page — URL always matches visible reel)
+      if (!code) {
+        const m = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
+        if (m) code = m[2];
+      }
+      console.log("[IMD] downloadVideo code:", code, "| from:", article ? "article" : "url");
 
       // ── Strategy 1: SSR JSON CDN URL matched by CODE (not index!) ──
       // Index matching is unreliable because SSR data is from initial page load
