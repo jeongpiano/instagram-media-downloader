@@ -31,7 +31,7 @@ try {
 function classifyUrl(url) {
   // Skip tiny resources and profile pics
   if (url.includes("/t51.2885-19/")) return null; // profile pic path
-  if (url.includes("/v/t16/") || url.includes(".mp4")) return "videos";
+  if (url.includes("/v/t16/") || url.includes("/o1/v/t") || url.includes(".mp4")) return "videos";
   // Large images from posts (not story stickers, not s150x150)
   if ((url.includes(".jpg") || url.includes(".webp")) && !url.includes("s150x150")) {
     return "images";
@@ -72,6 +72,8 @@ const handlers = {
     respond({
       ok: true,
       urls: tab ? [...tab.videos.keys()] : [],
+      // urlEntries: [{url, ts}] — used by content.js to match URLs to specific video play events
+      urlEntries: tab ? [...tab.videos.entries()].map(([url, ts]) => ({ url, ts })) : [],
       imageUrls: tab ? [...tab.images.keys()] : [],
       thumbnails: tab?.thumbnails || {}
     });
@@ -104,12 +106,26 @@ const handlers = {
     }
   },
 
+  async FETCH_THUMBNAIL(msg, _s, respond) {
+    try {
+      const res = await fetch(msg.url, { redirect: "follow" });
+      if (!res.ok) { respond({ ok: false }); return; }
+      const blob = await res.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => respond({ ok: true, dataUrl: reader.result });
+      reader.onerror = () => respond({ ok: false });
+      reader.readAsDataURL(blob);
+    } catch {
+      respond({ ok: false });
+    }
+  },
+
   EXTRACT_FROM_SCRIPTS(msg, sender, respond) {
     const tabId = sender.tab?.id;
     if (tabId && msg.urls?.length) {
       const tab = getTab(tabId);
       for (const url of msg.urls) {
-        if (url.includes(".mp4") || url.includes("/v/t16/")) {
+        if (url.includes(".mp4") || url.includes("/v/t16/") || url.includes("/o1/v/t")) {
           tab.videos.set(url, Date.now());
         } else {
           tab.images.set(url, Date.now());
@@ -158,11 +174,27 @@ async function fetchEmbed(postUrl) {
   const html = await res.text();
   const urls = [];
   let m;
+  // HTML video tags
   const re1 = /<source\s+src="([^"]+)"/g;
   while ((m = re1.exec(html))) urls.push(decHtml(m[1]));
   const re2 = /<video[^>]+src="([^"]+)"/g;
   while ((m = re2.exec(html))) { const u = decHtml(m[1]); if (!urls.includes(u)) urls.push(u); }
-  return urls;
+  // JSON video_url field — Instagram embed HTML contains doubly-escaped JS JSON:
+  //   \"video_url\":\"https://...mp4?\u0026token...\"
+  // The URL contains \u0026 (escaped &), so we must allow \+non-quote inside the capture.
+  // Pattern: allow [^"\\] (normal chars) OR \\[^"] (backslash + non-quote) inside the value.
+  const re3 = /\\"video_url\\":\\"(https:(?:[^"\\]|\\[^"])*)\\"/g;
+  while ((m = re3.exec(html))) {
+    const u = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+    if (!urls.includes(u)) urls.push(u);
+  }
+  // Direct CDN .mp4 URLs as last resort (catches any format)
+  const re4 = /https:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*/g;
+  while ((m = re4.exec(html))) {
+    const u = decHtml(m[0]).split("\\")[0]; // strip any trailing escaped chars
+    if (u.startsWith("https://") && !urls.includes(u)) urls.push(u);
+  }
+  return urls.filter(u => u.startsWith("https://") && (u.includes("cdninstagram") || u.includes("fbcdn")));
 }
 
 function decHtml(s) {

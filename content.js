@@ -4,6 +4,8 @@
   const PROCESSED = "data-imd";
   const WRAP_CLASS = "imd-wrap";
   const BTN_CLASS = "imd-btn";
+  const VISIBLE_CLASS = "imd-visible";
+
   // CDN domains used by Instagram
   const CDN_PATTERN = /cdninstagram\.com|fbcdn\.net|scontent[^.]*\.instagram\.com/;
 
@@ -14,24 +16,7 @@
   let scanTimer = null;
   let isNavigating = false;
 
-  injectStyles();
   init();
-
-  function injectStyles() {
-    if (document.getElementById("imd-injected-styles")) return;
-    const style = document.createElement("style");
-    style.id = "imd-injected-styles";
-    style.textContent = `
-      .imd-btn{display:inline-flex!important;align-items:center!important;gap:6px!important;padding:8px 14px!important;border:none!important;border-radius:20px!important;background:rgba(0,0,0,.78)!important;color:#fff!important;font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif!important;cursor:pointer!important;backdrop-filter:blur(10px)!important;-webkit-backdrop-filter:blur(10px)!important;box-shadow:0 2px 16px rgba(0,0,0,.35)!important;transition:background 150ms ease,transform 120ms ease!important;white-space:nowrap!important;user-select:none!important;-webkit-user-select:none!important;pointer-events:auto!important}
-      .imd-btn:hover{background:rgba(0,0,0,.92)!important;transform:scale(1.05)!important}
-      .imd-btn:active{transform:scale(.96)!important}
-      .imd-btn:disabled{cursor:wait!important;opacity:.8!important}
-      .imd-btn svg{flex-shrink:0!important}
-      @keyframes imd-spin{to{transform:rotate(360deg)}}
-      .imd-spin{animation:imd-spin .7s linear infinite!important}
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
 
   function init() {
     extractVideoUrlsFromScripts();
@@ -67,6 +52,13 @@
     window.addEventListener("popstate", () => {
       if (location.href !== lastUrl) onNavigate();
     });
+
+    // Re-scan on scroll for lazy-loaded content (infinite scroll)
+    let scrollTimer = null;
+    window.addEventListener("scroll", () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => { scrollTimer = null; scheduleScan(); }, 500);
+    }, { passive: true });
   }
 
   function onNavigate() {
@@ -119,7 +111,7 @@
         if (obj.image_versions2?.candidates?.length) {
           thumb = obj.image_versions2.candidates[0].url;
         }
-        out.push({ url: best.url, type: "video", thumb, y: out.length });
+        out.push({ url: best.url, type: "video", thumb, code: obj.code || null, y: out.length });
       }
       return;
     }
@@ -159,63 +151,296 @@
     }, 800);
   }
 
+  // Extract the Instagram post shortcode nearest to a video element.
+  function getPostCode(videoEl) {
+    // 1. Nearest article link (works when article has a timestamp/permalink <a>)
+    const article = videoEl.closest("article");
+    if (article) {
+      const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
+      if (a) {
+        const am = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/);
+        if (am) return am[2];
+      }
+    }
+
+    // 2. URL code — on reels/post pages, Instagram updates the URL to /reel/CODE/
+    //    via pushState. This is the most reliable source for the currently-visible video.
+    const urlMatch = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
+    if (urlMatch) {
+      const urlCode = urlMatch[2];
+      const allVideos = [...document.querySelectorAll("video")];
+      if (allVideos.length <= 1) return urlCode;
+      // Multiple videos: URL code belongs to the most-visible one
+      const vh = window.innerHeight;
+      const vr = videoEl.getBoundingClientRect();
+      const visibleH = Math.max(0, Math.min(vr.bottom, vh) - Math.max(vr.top, 0));
+      const totalH = vr.height || 1;
+      if (visibleH / totalH > 0.3) return urlCode; // >30% visible → it's the current reel
+    }
+
+    // 3. SSR JSON — parse the JSON tree to find objects where "code" and "video_versions"
+    //    are siblings. IMPORTANT: SSR data is from the initial page load, so it becomes
+    //    stale after the user scrolls to dynamically-loaded content.
+    const ssrEntries = []; // [{code, url}]
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      try {
+        const items = [];
+        findMediaUrls(JSON.parse(s.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.code) ssrEntries.push({ code: item.code, url: item.url });
+        }
+      } catch {}
+    }
+    // Validate freshness: if URL has a code not in SSR, the SSR data is stale
+    if (urlMatch && ssrEntries.length > 0 && !ssrEntries.some(e => e.code === urlMatch[2])) {
+      return ""; // SSR stale — no reliable code for this video
+    }
+    if (ssrEntries.length === 1) return ssrEntries[0].code;
+    if (ssrEntries.length > 1) {
+      const allVideos = [...document.querySelectorAll("video")];
+      const vIdx = allVideos.indexOf(videoEl);
+      if (vIdx >= 0 && vIdx < ssrEntries.length) return ssrEntries[vIdx].code;
+      const allArticles = [...document.querySelectorAll("article")];
+      const aIdx = allArticles.indexOf(videoEl.closest("article"));
+      if (aIdx >= 0 && aIdx < ssrEntries.length) return ssrEntries[aIdx].code;
+      // DO NOT fallback to ssrEntries[0] — that would assign the first video's code
+      // to ALL unmatched videos, causing them to download the wrong video.
+      return "";
+    }
+
+    // 4. Page URL — fallback for single-post pages
+    if (urlMatch) return urlMatch[2];
+    return "";
+  }
+
+  // Get SSR JSON entries {code, url} for all videos on the page (cached per scan cycle)
+  let _ssrCache = null;
+  function getSsrVideoEntries() {
+    if (_ssrCache) return _ssrCache;
+    const entries = [];
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+      try {
+        const items = [];
+        findMediaUrls(JSON.parse(s.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.url) {
+            entries.push({ code: item.code || "", url: item.url });
+          }
+        }
+      } catch {}
+    }
+    _ssrCache = entries;
+    return entries;
+  }
+
   function scan() {
-    // Videos — button goes on the video element itself
+    _ssrCache = null; // invalidate SSR cache each scan cycle
+
+    // Videos
     for (const video of document.querySelectorAll("video")) {
       if (video.hasAttribute(PROCESSED)) continue;
       video.setAttribute(PROCESSED, "video");
+      // Clear stale data from previous navigation (Instagram reuses <video> elements)
+      delete video.dataset.imdCode;
+      delete video.dataset.imdVideoUrl;
+      // Store shortcode so downloadVideo() can look up the correct CDN URL
+      const code = getPostCode(video);
+      if (code) video.dataset.imdCode = code;
       const container = findContainer(video, true);
-      if (container) attachOverlay(container, video, "video");
+      if (container && !container.querySelector(`.${WRAP_CLASS}`)) attachOverlay(container, video, "video");
     }
 
     // Images – only large CDN images (skip avatars, icons)
     for (const img of document.querySelectorAll("img")) {
       if (img.hasAttribute(PROCESSED)) continue;
-      const src = img.src || img.currentSrc || "";
-      if (!src || !CDN_PATTERN.test(src)) continue;
-      // Skip small images (profile pics, icons)
-      const rect = img.getBoundingClientRect();
-      if (rect.width < 150 || rect.height < 150) continue;
+      const src = getCdnUrl(img);
+      if (!src) continue;
       // Skip profile pictures path
       if (src.includes("/t51.2885-19/")) continue;
+      // Skip small images — use naturalWidth/Height as fallback for lazy-loaded
+      const rect = img.getBoundingClientRect();
+      const w = rect.width || img.naturalWidth || parseInt(img.getAttribute("width")) || 0;
+      const h = rect.height || img.naturalHeight || parseInt(img.getAttribute("height")) || 0;
+      if (w < 150 || h < 150) continue;
 
       img.setAttribute(PROCESSED, "image");
       const container = findContainer(img, false);
-      if (container) attachOverlay(container, img, "image");
+      if (!container || container.querySelector(`.${WRAP_CLASS}`)) continue;
+      attachOverlay(container, img, "image");
     }
+
+    // ── Carousel "All" button — add to EVERY wrap inside carousel articles ──
+    for (const article of document.querySelectorAll("article")) {
+      if (!isCarouselArticle(article)) continue;
+      article.setAttribute("data-imd-all", "1");
+      // Add "All" to every image wrap in this article (covers all slides)
+      for (const wrap of article.querySelectorAll(`.${WRAP_CLASS}`)) {
+        addCarouselAllBtn(wrap, article);
+      }
+    }
+  }
+
+  // Returns true when the article has multiple slides (carousel)
+  function isCarouselArticle(article) {
+    // 1. Next-slide button is present from slide 1 whenever there are ≥2 photos
+    if (article.querySelector('button[aria-label="Next"], button[aria-label="다음"]')) return true;
+    // 2. Position-based: SVG button near the right edge of the article
+    const ar = article.getBoundingClientRect();
+    for (const btn of article.querySelectorAll("button")) {
+      if (!btn.querySelector("svg")) continue;
+      const br = btn.getBoundingClientRect();
+      if (br.width > 0 && br.width < 60 && br.left > ar.right - 80) return true;
+    }
+    // 3. 1/N counter (appears after user swipes at least once)
+    for (const el of article.querySelectorAll("*")) {
+      if (el.children.length === 0 && /^\s*\d{1,2}\s*\/\s*\d{1,2}\s*$/.test(el.textContent)) return true;
+    }
+    return false;
+  }
+
+  // Append the "All" button to an existing wrap (only once per wrap)
+  function addCarouselAllBtn(wrap, article) {
+    if (wrap.querySelector(".imd-all-btn")) return; // already added
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = BTN_CLASS + " imd-all-btn";
+    allBtn.style.cssText = "background:rgba(39,174,96,0.9);margin-left:6px;";
+    allBtn.innerHTML = `${ICON_IMG_DL}<span>All</span>`;
+    allBtn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      downloadAllCarousel(article, allBtn);
+    });
+    wrap.appendChild(allBtn);
+  }
+
+  // Auto-advance carousel and download all photos
+  async function downloadAllCarousel(article, btn) {
+    const prev = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `${ICON_SPINNER}<span>스캔...</span>`;
+
+    const allUrls = new Set();
+
+    function collectCurrentSlideImages() {
+      for (const img of article.querySelectorAll("img")) {
+        const srcset = img.getAttribute("srcset") || "";
+        let best = "";
+        if (srcset) {
+          const cands = srcset.split(",").map(s => {
+            const p = s.trim().split(/\s+/);
+            return { url: p[0], w: parseInt(p[1]) || 0 };
+          }).filter(c => CDN_PATTERN.test(c.url) && !c.url.includes("t51.2885-19") && !c.url.includes("s150x150"));
+          if (cands.length) { cands.sort((a, b) => b.w - a.w); best = cands[0].url; }
+        }
+        if (!best) best = img.src || img.currentSrc || "";
+        if (!CDN_PATTERN.test(best) || best.includes("t51.2885-19") || best.includes("s150x150")) continue;
+        const r = img.getBoundingClientRect();
+        if ((r.width || img.naturalWidth || 0) < 150) continue;
+        allUrls.add(best);
+      }
+    }
+
+    function findSlideBtn(next) {
+      const nextLabels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti"];
+      const prevLabels = ["돌아가기", "Go back", "이전", "Anterior", "Zurück", "Précédent", "前へ", "上一张", "Indietro"];
+      for (const label of (next ? nextLabels : prevLabels)) {
+        const b = article.querySelector(`button[aria-label="${label}"]`);
+        if (b) return b;
+      }
+      // Position-based fallback: SVG button at right (next) or left (prev) edge of article
+      const ar = article.getBoundingClientRect();
+      for (const b of article.querySelectorAll("button")) {
+        if (!b.querySelector("svg")) continue;
+        const br = b.getBoundingClientRect();
+        if (next  && br.left > ar.right - 90 && br.width < 60) return b;
+        if (!next && br.right < ar.left + 90 && br.width < 60) return b;
+      }
+      return null;
+    }
+
+    // Go to first slide
+    let pb;
+    for (let i = 0; i < 20 && (pb = findSlideBtn(false)); i++) {
+      pb.click();
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    // Advance through all slides, collecting images
+    collectCurrentSlideImages();
+    let nb;
+    for (let i = 0; i < 30 && (nb = findSlideBtn(true)); i++) {
+      nb.click();
+      await waitForNewSlide(article, 700);
+      collectCurrentSlideImages();
+    }
+
+    const urls = [...allUrls];
+    if (!urls.length) { showStatus(btn, prev, "사진 없음", 2000); return; }
+
+    // Get post shortcode for filename
+    const aLink = article.querySelector('a[href*="/p/"],a[href*="/reel/"]');
+    const code = aLink?.href.match(/\/(p|reel)\/([\w-]+)/)?.[2]
+      || location.pathname.match(/\/(p|reel)\/([\w-]+)/)?.[2]
+      || Date.now().toString();
+
+    for (let i = 0; i < urls.length; i++) {
+      btn.innerHTML = `<span>${i + 1}/${urls.length}</span>`;
+      await sendMsg({ type: "DOWNLOAD_MEDIA", url: urls[i], filename: `instagram/${code}_${i + 1}.jpg` });
+      await new Promise(r => setTimeout(r, 200));
+    }
+    showStatus(btn, prev, `${ICON_CHECK}<span>완료 (${urls.length}장)</span>`, 5000);
+  }
+
+  // Wait until a new image appears in the article (or timeout)
+  function waitForNewSlide(article, timeout) {
+    return new Promise(resolve => {
+      const key = () => [...article.querySelectorAll("img")].map(i => i.src + (i.currentSrc || "")).join("|");
+      const initial = key();
+      const mo = new MutationObserver(() => { if (key() !== initial) { mo.disconnect(); resolve(); } });
+      mo.observe(article, { subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+      setTimeout(() => { mo.disconnect(); resolve(); }, timeout);
+    });
   }
 
   function findContainer(el, isVideo) {
-    // Walk up to ARTICLE or a large non-clipping container.
-    // Instagram wraps media in _aagv (overflow:hidden) inside _aagu,
-    // so we skip overflow:hidden containers to avoid clipping the button.
+    // Walk up from the element to find a suitable container
+    // (Never use <video> or <img> itself — they cannot have visible children)
     let node = el.parentElement;
-    let fallback = null;
-    for (let i = 0; i < 12 && node; i++) {
-      if (node.tagName === "ARTICLE") return node;
+    for (let i = 0; i < 8 && node; i++) {
       const r = node.getBoundingClientRect();
-      if (r.width >= 150 && r.height >= 150) {
-        if (!fallback) fallback = node;
-        // Prefer containers without overflow:hidden
-        if (getComputedStyle(node).overflow !== "hidden") return node;
-      }
+      if (r.width >= 150 && r.height >= 150) return node;
       node = node.parentElement;
     }
-    return fallback || el.parentElement;
+    return el.parentElement;
   }
 
-  // ── Overlay button (always visible, top-right) ──
+  // Extract CDN URL from img src or srcset
+  function getCdnUrl(img) {
+    const src = img.src || img.currentSrc || "";
+    if (src && CDN_PATTERN.test(src)) return src;
+    const srcset = img.getAttribute("srcset");
+    if (srcset) {
+      for (const part of srcset.split(",")) {
+        const url = part.trim().split(/\s+/)[0];
+        if (CDN_PATTERN.test(url)) return url;
+      }
+    }
+    return "";
+  }
+
+  // ── Overlay button with JS-based hover ──
   function attachOverlay(container, mediaEl, mediaType) {
     const isVideo = mediaType === "video";
 
-    // Make container positionable
+    // Make container positionable (container is always a parent div, never <video>/<img>)
     if (getComputedStyle(container).position === "static") {
-      container.style.setProperty("position", "relative", "important");
+      container.style.position = "relative";
     }
+    // Add class for CSS-based hover (more reliable than JS events with Instagram overlays)
+    container.classList.add("imd-hover-parent");
 
     const wrap = document.createElement("div");
     wrap.className = WRAP_CLASS + (isVideo ? " imd-video" : "");
-    wrap.setAttribute("style", "position:absolute;right:10px;top:10px;z-index:2147483647;pointer-events:auto;opacity:1;");
 
     const label = isVideo ? "Video" : "Photo";
     const icon = isVideo ? ICON_VIDEO_DL : ICON_IMG_DL;
@@ -239,15 +464,71 @@
     wrap.appendChild(btn);
     container.appendChild(wrap);
 
-    // Watch for src changes on video
+    // JS-based hover: listen on the container (not mediaEl) to handle Instagram overlays
+    const show = () => wrap.classList.add(VISIBLE_CLASS);
+    const hide = () => {
+      setTimeout(() => {
+        if (!wrap.matches(":hover") && !container.matches(":hover")) {
+          wrap.classList.remove(VISIBLE_CLASS);
+        }
+      }, 200);
+    };
+
+    container.addEventListener("mouseenter", show);
+    container.addEventListener("mouseleave", hide);
+    wrap.addEventListener("mouseenter", show);
+    wrap.addEventListener("mouseleave", hide);
+
+    // For videos: capture CDN URL at the moment the video starts playing
     if (isVideo) {
+      const storeCapturedUrl = () => {
+        const playTime = Date.now();
+        setTimeout(async () => {
+          const c = await sendMsg({ type: "GET_CAPTURED_URLS" });
+          // Use timestamp proximity: pick the full video URL captured closest to this play event
+          const entries = (c?.urlEntries || []).filter(e =>
+            !e.url.includes("bytestart") && !e.url.includes("-seg-") && !e.url.includes("/range/")
+          );
+          if (entries.length) {
+            entries.sort((a, b) => Math.abs(a.ts - playTime) - Math.abs(b.ts - playTime));
+            mediaEl.dataset.imdVideoUrl = entries[0].url;
+            return;
+          }
+          // Fallback: strip range params from captured URLs (Instagram uses bytestart/byteend
+          // for DASH/MSE streaming, but the base URL without range params downloads the full video)
+          const allEntries = (c?.urlEntries || []).filter(e =>
+            (e.url.includes("cdninstagram") || e.url.includes("fbcdn")) &&
+            !e.url.includes("-seg-")
+          );
+          if (allEntries.length) {
+            allEntries.sort((a, b) => Math.abs(a.ts - playTime) - Math.abs(b.ts - playTime));
+            const baseUrl = allEntries[0].url
+              .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
+              .replace(/[?&]$/, "");
+            mediaEl.dataset.imdVideoUrl = baseUrl;
+            return;
+          }
+          // Last fallback: last captured full URL
+          const full = (c?.urls || []).filter(u =>
+            !u.includes("bytestart") && !u.includes("-seg-") && !u.includes("/range/")
+          );
+          if (full.length) mediaEl.dataset.imdVideoUrl = full[full.length - 1];
+        }, 400); // brief wait for webRequest to record the URL
+      };
+      // Use { once: true } — fires once when video first plays; MutationObserver below handles src changes
+      mediaEl.addEventListener("play",        storeCapturedUrl, { once: true });
+      mediaEl.addEventListener("loadeddata",  storeCapturedUrl, { once: true });
+      // If video is already playing/loaded (scan ran after autoplay), capture now
+      if (!mediaEl.paused || mediaEl.readyState >= 2) {
+        storeCapturedUrl();
+      }
+
+      // Watch for non-blob src changes
       const srcObs = new MutationObserver(() => {
         const s = mediaEl.currentSrc || mediaEl.src || "";
-        const poster = mediaEl.poster || "";
         if (s && !s.startsWith("blob:")) {
-          const msg = { type: "EXTRACT_FROM_SCRIPTS", urls: [s] };
-          if (poster) msg.thumbnails = { [s]: poster };
-          try { chrome.runtime.sendMessage(msg); } catch (_) {}
+          mediaEl.dataset.imdVideoUrl = s;
+          try { chrome.runtime.sendMessage({ type: "EXTRACT_FROM_SCRIPTS", urls: [s] }); } catch (_) {}
         }
       });
       srcObs.observe(mediaEl, { attributes: true, attributeFilter: ["src"] });
@@ -266,7 +547,7 @@
       return;
     }
 
-    const filename = buildFilename("jpg", img);
+    const filename = buildFilename("jpg");
     const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
     if (resp?.ok) {
       showStatus(btn, prev, `${ICON_CHECK}<span>Saved!</span>`, 2500);
@@ -299,32 +580,83 @@
     try {
       let url = "";
 
-      // Strategy 1: embed endpoint (returns proper MP4, not fMP4 fragments)
-      {
-        const postUrl = findPostUrlNear(video) || location.href.split("?")[0];
-        if (POST_PATTERN.test(postUrl)) {
-          const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
-          const embedUrls = embed?.videoUrls || [];
-          if (embedUrls.length) url = embedUrls[0];
+      // ── Derive shortcode at download time — simple & reliable ──
+      // DO NOT use getPostCode() or dataset.imdCode — they rely on SSR index
+      // matching which becomes stale after scrolling.
+      let code = "";
+      // 1) Article permalink (feed / explore posts)
+      const article = video.closest("article");
+      if (article) {
+        const a = article.querySelector('a[href*="/p/"],a[href*="/reel/"],a[href*="/tv/"]');
+        if (a) { const m = a.href.match(/\/(p|reel|tv|reels)\/([\w-]+)/); if (m) code = m[2]; }
+      }
+      // 2) Current page URL (reels page — URL always matches visible reel)
+      if (!code) {
+        const m = location.pathname.match(/\/(p|reel|tv)\/([\w-]+)/);
+        if (m) code = m[2];
+      }
+      console.log("[IMD] downloadVideo code:", code, "| from:", article ? "article" : "url");
+
+      // ── Strategy 1: SSR JSON CDN URL matched by CODE (not index!) ──
+      // Index matching is unreliable because SSR data is from initial page load
+      // but video elements change as user scrolls. Code matching guarantees
+      // the URL is for the correct video.
+      if (!url && code) {
+        const ssrEntries = getSsrVideoEntries();
+        const match = ssrEntries.find(e => e.code && e.code === code);
+        if (match) url = match.url;
+      }
+
+      // ── Strategy 2: CDN URL captured when this video played ──
+      if (!url && video.dataset.imdVideoUrl) {
+        url = video.dataset.imdVideoUrl;
+      }
+
+      // ── Strategy 3: non-blob src on the video element ──
+      if (!url) url = getNonBlobSrc(video);
+
+      // ── Strategy 4: embed endpoint via shortcode ──
+      if (!url && code) {
+        for (const t of ["reel", "p", "tv"]) {
+          const embed = await sendMsg({
+            type: "FETCH_EMBED_VIDEOS",
+            postUrl: `https://www.instagram.com/${t}/${code}/`
+          });
+          if (embed?.videoUrls?.length) { url = embed.videoUrls[0]; break; }
         }
       }
 
-      // Strategy 2: video element's non-blob src
-      if (!url) url = getNonBlobSrc(video);
-
-      // Strategy 3: look in parent article/post data
+      // ── Strategy 5: data attributes on parent elements ──
       if (!url) url = findVideoUrlInPost(video);
 
-      // Strategy 4: from SSR JSON scripts near this video
-      if (!url) url = findVideoUrlFromScriptsNear(video);
-
-      // Strategy 5: network-captured CDN URLs
+      // ── Strategy 7: network-captured URLs (last resort) ──
       if (!url) {
         const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
         const capturedUrls = captured?.urls || [];
-        if (capturedUrls.length) {
-          url = capturedUrls[capturedUrls.length - 1];
+        const full = capturedUrls.filter(u =>
+          !u.includes("bytestart") && !u.includes("byteend") &&
+          !u.includes("-seg-") && !u.includes("/range/")
+        );
+        if (full.length) {
+          url = full[full.length - 1];
+        } else {
+          // Strip range params
+          const withRange = capturedUrls.filter(u =>
+            u.includes("cdninstagram") || u.includes("fbcdn")
+          );
+          if (withRange.length) {
+            url = withRange[withRange.length - 1]
+              .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
+              .replace(/[?&]$/, "");
+          }
         }
+      }
+
+      // ── Strategy 8: embed from current page URL ──
+      if (!url) {
+        const postUrl = location.href.split("?")[0];
+        const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
+        if (embed?.videoUrls?.length) url = embed.videoUrls[0];
       }
 
       if (!url) {
@@ -332,7 +664,9 @@
         return;
       }
 
-      const filename = buildFilename("mp4", video);
+      // Use code in filename so user can tell downloads apart
+      const postId = code || location.pathname.match(/\/(p|reel|tv|reels)\/([\w-]+)/)?.[2] || "instagram";
+      const filename = `instagram/${postId}_${Date.now()}.mp4`;
       const resp = await sendMsg({ type: "DOWNLOAD_MEDIA", url, filename });
       if (resp?.ok) {
         showStatus(btn, prev, `${ICON_CHECK}<span>Saved!</span>`, 2500);
@@ -340,7 +674,7 @@
         showStatus(btn, prev, "<span>Failed</span>", 2500);
       }
     } catch (err) {
-      console.error("[IMD]", err);
+      console.error("[IMD] downloadVideo error:", err);
       showStatus(btn, prev, "<span>Error</span>", 2000);
     }
   }
@@ -358,28 +692,43 @@
     return "";
   }
 
-  // ── Find video URL from SSR JSON near the video element ──
+  // ── Find video URL from SSR JSON scripts, matched to the specific video element ──
   function findVideoUrlFromScriptsNear(video) {
-    let postNode = video;
-    for (let i = 0; i < 10 && postNode; i++) {
-      if (postNode.tagName === "ARTICLE" || postNode.tagName === "SECTION" ||
-          (postNode.id && /post|thread|item|entry/i.test(postNode.id))) {
-        break;
-      }
-      postNode = postNode.parentElement;
-    }
-    if (!postNode) return "";
-
-    const scripts = postNode.querySelectorAll ? postNode.querySelectorAll('script[type="application/json"]') : [];
-    for (const script of scripts) {
+    // Collect ALL unique video URLs from ALL SSR JSON scripts on the page
+    const allSsrVideoUrls = [];
+    for (const script of document.querySelectorAll('script[type="application/json"]')) {
       try {
-        const urls = [];
-        findMediaUrls(JSON.parse(script.textContent), urls, 0);
-        for (const item of urls) {
-          if (item.type === "video" && item.url) return item.url;
+        const items = [];
+        findMediaUrls(JSON.parse(script.textContent), items, 0);
+        for (const item of items) {
+          if (item.type === "video" && item.url && !allSsrVideoUrls.includes(item.url)) {
+            allSsrVideoUrls.push(item.url);
+          }
         }
       } catch {}
     }
+
+    if (!allSsrVideoUrls.length) return "";
+    if (allSsrVideoUrls.length === 1) return allSsrVideoUrls[0];
+
+    // Match by article position (most reliable for feeds with multiple video posts)
+    const allArticles = Array.from(document.querySelectorAll("article"));
+    const closestArticle = video.closest("article");
+    if (closestArticle && allArticles.length > 0) {
+      const articleIdx = allArticles.indexOf(closestArticle);
+      if (articleIdx >= 0 && articleIdx < allSsrVideoUrls.length) {
+        return allSsrVideoUrls[articleIdx];
+      }
+    }
+
+    // No articles (reels page, stories, etc.) — match by video element index
+    const allVideos = Array.from(document.querySelectorAll("video"));
+    const videoIdx = allVideos.indexOf(video);
+    if (videoIdx >= 0 && videoIdx < allSsrVideoUrls.length) {
+      return allSsrVideoUrls[videoIdx];
+    }
+    // No confident match — return "" so download() uses other strategies
+    // (DO NOT fallback to allSsrVideoUrls[0] — that always returns the first video)
     return "";
   }
 
@@ -395,44 +744,17 @@
   }
 
   // ── Helpers ──
-
-  /** Extract post URL from nearest <a> link around a media element */
-  function findPostUrlNear(el) {
-    let node = el;
-    for (let i = 0; i < 15 && node; i++) {
-      // Check <a> tags inside or on the node itself
-      const links = node.tagName === "A" ? [node] : [...(node.querySelectorAll?.("a[href]") || [])];
-      for (const a of links) {
-        const href = a.getAttribute("href") || "";
-        if (POST_PATTERN.test(href)) {
-          // Normalize to full URL
-          try { return new URL(href, location.origin).href.split("?")[0]; } catch {}
-        }
+  function buildFilename(ext) {
+    const parts = location.pathname.split("/").filter(Boolean);
+    // Instagram post patterns: /p/CODE/, /reel/CODE/, /tv/CODE/, /reels/CODE/, /stories/USER/ID/
+    const postTypes = ["p", "reel", "tv", "reels", "stories"];
+    let postId = "instagram";
+    for (let i = 0; i < parts.length; i++) {
+      if (postTypes.includes(parts[i]) && parts[i + 1]) {
+        postId = parts[i + 1];
+        break;
       }
-      node = node.parentElement;
     }
-    return "";
-  }
-
-  /** Extract shortcode from a URL path */
-  function extractShortcode(url) {
-    try {
-      const parts = new URL(url, location.origin).pathname.split("/").filter(Boolean);
-      const postTypes = ["p", "reel", "tv", "reels", "stories"];
-      for (let i = 0; i < parts.length; i++) {
-        if (postTypes.includes(parts[i]) && parts[i + 1]) return parts[i + 1];
-      }
-    } catch {}
-    return "";
-  }
-
-  function buildFilename(ext, mediaEl) {
-    // 1) Try shortcode from nearest post link (works on feed pages)
-    let postId = mediaEl ? extractShortcode(findPostUrlNear(mediaEl)) : "";
-    // 2) Fallback to current page URL
-    if (!postId) postId = extractShortcode(location.href);
-    // 3) Final fallback
-    if (!postId) postId = "instagram";
     return `instagram/${postId}_${Date.now()}.${ext}`;
   }
 
