@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6C63FF"/>
+      <stop offset="100%" stop-color="#FF6584"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  <!-- Download arrow shaft -->
+  <rect x="54" y="28" width="20" height="40" rx="3" fill="white"/>
+  <!-- Download arrow chevron -->
+  <polygon points="64,92 38,62 52,62 52,68 76,68 76,62 90,62" fill="white"/>
+  <!-- Base tray line -->
+  <rect x="32" y="90" width="64" height="10" rx="5" fill="white"/>
+</svg>

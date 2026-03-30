@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 380px;
+      min-height: 100px;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #1a1a1a;
+      background: #fff;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid #eee;
+    }
+    .header img { width: 24px; height: 24px; }
+    .header h1 { font-size: 15px; font-weight: 700; }
+    .status {
+      padding: 16px;
+      color: #666;
+      font-size: 13px;
+      text-align: center;
+    }
+    .section-title {
+      padding: 10px 16px 4px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #999;
+    }
+    .media-list {
+      list-style: none;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .media-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #f5f5f5;
+    }
+    .media-item:last-child { border-bottom: none; }
+    .media-thumb {
+      width: 52px;
+      height: 52px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #f0f0f0;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .media-thumb img,
+    .media-thumb video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .thumb-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #fce4ec 0%, #ffecd2 100%);
+      color: #999;
+    }
+    .media-type {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .type-video { background: #fce4ec; color: #E1306C; }
+    .type-photo { background: #e8f8e8; color: #27ae60; }
+    .media-info { flex: 1; min-width: 0; }
+    .media-url {
+      font-size: 11px;
+      color: #aaa;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dl-btn {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 12px;
+      border: none;
+      border-radius: 16px;
+      background: #E1306C;
+      color: #fff;
+      font: 600 12px/1 inherit;
+      cursor: pointer;
+      transition: background 150ms;
+    }
+    .dl-btn:hover { background: #c13584; }
+    .dl-btn:disabled { background: #ccc; cursor: wait; }
+    .dl-btn.done { background: #27ae60; }
+    .dl-all-wrap {
+      padding: 10px 16px 14px;
+      border-top: 1px solid #eee;
+    }
+    .dl-all {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 20px;
+      background: #E1306C;
+      color: #fff;
+      font: 700 14px/1 inherit;
+      cursor: pointer;
+      transition: background 150ms;
+    }
+    .dl-all:hover { background: #c13584; }
+    .dl-all:disabled { background: #ccc; cursor: wait; }
+    .scan-btn {
+      display: block;
+      margin: 4px auto 12px;
+      padding: 8px 16px;
+      border: 1px solid #ddd;
+      border-radius: 16px;
+      background: #fff;
+      color: #333;
+      font: 13px inherit;
+      cursor: pointer;
+    }
+    .scan-btn:hover { background: #f5f5f5; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icons/icon48.png" alt="">
+    <h1>Instagram Media Downloader</h1>
+  </div>
+  <div id="content">
+    <div class="status" id="status">미디어 검색 중...</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

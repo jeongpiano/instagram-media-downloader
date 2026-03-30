@@ -1,0 +1,91 @@
+/* ── Button wrapper ── */
+.imd-wrap {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2147483647;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+/* Video button: top-right, always visible (on the video element itself) */
+.imd-wrap.imd-video {
+  right: 10px;
+  top: 10px;
+  bottom: auto;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Fully visible on hover (JS-based or CSS parent hover) */
+.imd-wrap:hover,
+.imd-wrap.imd-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* CSS-based parent hover — works even when Instagram overlays block JS events */
+.imd-hover-parent:hover > .imd-wrap {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* The BUTTON itself is always clickable */
+.imd-wrap .imd-btn {
+  pointer-events: auto;
+}
+
+/* Keep button visible while downloading/showing status */
+.imd-wrap:has(button:disabled) {
+  opacity: 1 !important;
+  transform: translateY(0) !important;
+}
+
+/* ── Download button ── */
+.imd-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.35);
+  transition: background 150ms ease, transform 120ms ease;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.imd-btn:hover {
+  background: rgba(0, 0, 0, 0.92);
+  transform: scale(1.05);
+}
+
+.imd-btn:active {
+  transform: scale(0.96);
+}
+
+.imd-btn:disabled {
+  cursor: wait;
+  opacity: 0.8;
+}
+
+.imd-btn svg {
+  flex-shrink: 0;
+}
+
+/* ── Spinner ── */
+@keyframes imd-spin {
+  to { transform: rotate(360deg); }
+}
+.imd-spin {
+  animation: imd-spin 0.7s linear infinite;
+}
