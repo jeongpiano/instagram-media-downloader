@@ -120,7 +120,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Images section
   if (images.length) {
-    html += `<div class="section-title">Photos (${images.length})</div>`;
+    html += `<div class="section-header">
+      <div class="section-title">Photos (${images.length})</div>
+      <button class="dl-carousel" id="dl-carousel">📷 캐러셀 전체 다운로드</button>
+    </div>`;
     html += `<ul class="media-list">`;
     images.forEach((url, i) => {
       const thumb = allThumbnails[url] || url;
@@ -205,6 +208,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.textContent = "완료!";
       btn.className = "dl-btn done";
     });
+  });
+
+  // Carousel: auto-advance through all slides and download every photo
+  document.getElementById("dl-carousel")?.addEventListener("click", async (e) => {
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "슬라이드 스캔 중...";
+
+    let urls = [];
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: autoAdvanceCarousel
+      });
+      urls = result?.result || [];
+    } catch {
+      btn.textContent = "스캔 실패";
+      btn.disabled = false;
+      return;
+    }
+
+    if (!urls.length) {
+      btn.textContent = "사진 없음";
+      return;
+    }
+
+    for (let i = 0; i < urls.length; i++) {
+      btn.textContent = `다운로드 중 (${i + 1}/${urls.length})`;
+      const filename = `instagram/${postId}_photo_${i + 1}.jpg`;
+      await chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url: urls[i], filename });
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    btn.textContent = `완료! (${urls.length}장)`;
+    btn.style.background = "#1a7a46";
   });
 });
 
@@ -435,6 +473,92 @@ function scanPage() {
   }
 
   return { videos: [...new Set(videos)], images: [...new Set(images)], thumbnails, shortcodes };
+}
+
+// Runs in content-script context: advances carousel to collect ALL slide image URLs
+async function autoAdvanceCarousel() {
+  const cdnRe = /cdninstagram\.com|fbcdn\.net/;
+  const vh = window.innerHeight;
+
+  // Find most-visible article
+  let mainArticle = null, bestH = 0;
+  for (const a of document.querySelectorAll("article")) {
+    const r = a.getBoundingClientRect();
+    const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+    if (h > bestH) { bestH = h; mainArticle = a; }
+  }
+  if (!mainArticle) return [];
+
+  // Collect best-quality CDN image URLs currently visible in the article
+  function collectImages() {
+    const found = [];
+    for (const img of mainArticle.querySelectorAll("img")) {
+      const srcset = img.getAttribute("srcset") || "";
+      let best = "";
+      if (srcset) {
+        const cands = srcset.split(",").map(s => {
+          const p = s.trim().split(/\s+/);
+          return { url: p[0], w: parseInt(p[1]) || 0 };
+        }).filter(c => cdnRe.test(c.url) && !c.url.includes("t51.2885-19") && !c.url.includes("s150x150") && !c.url.includes("s320x320"));
+        if (cands.length) { cands.sort((a, b) => b.w - a.w); best = cands[0].url; }
+      }
+      if (!best) best = img.src || img.currentSrc || "";
+      if (!cdnRe.test(best) || best.includes("t51.2885-19") || best.includes("s150x150") || best.includes("s320x320")) continue;
+      const r = img.getBoundingClientRect();
+      if ((r.width || img.naturalWidth || 0) < 150) continue;
+      if (!found.includes(best)) found.push(best);
+    }
+    return found;
+  }
+
+  // Find the "Next slide" button (try multiple aria-label locales + position-based fallback)
+  function findNextBtn() {
+    const labels = ["Next", "다음", "Siguiente", "Weiter", "Suivant", "次へ", "下一张", "Avanti", "Далее"];
+    for (const label of labels) {
+      const b = mainArticle.querySelector(`button[aria-label="${label}"]`);
+      if (b) return b;
+    }
+    // Fallback: SVG-containing button on the far right of the article
+    const ar = mainArticle.getBoundingClientRect();
+    for (const btn of mainArticle.querySelectorAll("button")) {
+      if (!btn.querySelector("svg")) continue;
+      const br = btn.getBoundingClientRect();
+      if (br.left > ar.right - 90 && br.width > 0 && br.width < 60) return btn;
+    }
+    return null;
+  }
+
+  // Get total slide count from "1 / N" or "1/N" overlay text
+  function getTotalSlides() {
+    for (const el of mainArticle.querySelectorAll("*")) {
+      if (el.children.length > 0) continue;
+      const t = el.textContent.trim();
+      const m = t.match(/^(\d+)\s*\/\s*(\d+)$/);
+      if (m) return parseInt(m[2]);
+    }
+    return 0;
+  }
+
+  const allUrls = new Set(collectImages());
+
+  if (!findNextBtn()) return [...allUrls]; // Not a carousel — return what we have
+
+  const total = getTotalSlides();
+  const maxSlides = total > 0 ? total : 20; // cap at 20 if count unknown
+
+  for (let i = 1; i < maxSlides; i++) {
+    const btn = findNextBtn();
+    if (!btn) break; // Reached the last slide
+
+    btn.click();
+    // Wait for the new slide image to appear and load
+    await new Promise(r => setTimeout(r, 700));
+    collectImages().forEach(u => allUrls.add(u));
+
+    if (!findNextBtn()) break; // Last slide — no more Next button
+  }
+
+  return [...allUrls];
 }
 
 function extractPostId(url) {
