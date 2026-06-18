@@ -628,7 +628,33 @@
       }
       console.log("[IMD] downloadVideo code:", code, "| from:", codeSource);
 
-      // ── Strategy 1: embed endpoint (returns proper MP4, not fMP4 fragments) ──
+      // ── Strategy A: CDN URL already captured when this video played (authenticated, exact) ──
+      if (!url && video.dataset.imdVideoUrl) {
+        url = video.dataset.imdVideoUrl;
+      }
+
+      // ── Strategy B: nudge playback to force Instagram to fetch the progressive MP4,
+      //    then read it back from the network capture. This is the click's user gesture,
+      //    so play() is allowed. Works for PRIVATE / followed accounts that the public
+      //    /embed endpoint cannot access — the #1 reason video downloads silently failed. ──
+      if (!url) {
+        url = await capturePlayingUrl(video);
+      }
+
+      // ── Strategy C: any full (non-range) CDN MP4 already captured for this tab ──
+      if (!url) {
+        const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
+        url = pickFullMp4(captured?.urlEntries || [], 0);
+      }
+
+      // ── Strategy D: SSR JSON CDN URL matched by CODE ──
+      if (!url && code) {
+        const ssrEntries = getSsrVideoEntries();
+        const match = ssrEntries.find(e => e.code && e.code === code);
+        if (match) url = match.url;
+      }
+
+      // ── Strategy E: embed endpoint (public posts) — returns a clean progressive MP4 ──
       if (!url && code) {
         for (const t of ["reel", "p", "tv"]) {
           const embed = await sendMsg({
@@ -639,47 +665,13 @@
         }
       }
 
-      // ── Strategy 2: SSR JSON CDN URL matched by CODE ──
-      if (!url && code) {
-        const ssrEntries = getSsrVideoEntries();
-        const match = ssrEntries.find(e => e.code && e.code === code);
-        if (match) url = match.url;
-      }
-
-      // ── Strategy 3: CDN URL captured when this video played ──
-      if (!url && video.dataset.imdVideoUrl) {
-        url = video.dataset.imdVideoUrl;
-      }
-
-      // ── Strategy 4: non-blob src on the video element ──
+      // ── Strategy F: non-blob src on the video element ──
       if (!url) url = getNonBlobSrc(video);
 
-      // ── Strategy 5: data attributes on parent elements ──
+      // ── Strategy G: data attributes on parent elements ──
       if (!url) url = findVideoUrlInPost(video);
 
-      // ── Strategy 6: network-captured URLs (last resort) ──
-      if (!url) {
-        const captured = await sendMsg({ type: "GET_CAPTURED_URLS" });
-        const capturedUrls = captured?.urls || [];
-        const full = capturedUrls.filter(u =>
-          !u.includes("bytestart") && !u.includes("byteend") &&
-          !u.includes("-seg-") && !u.includes("/range/")
-        );
-        if (full.length) {
-          url = full[full.length - 1];
-        } else {
-          const withRange = capturedUrls.filter(u =>
-            u.includes("cdninstagram") || u.includes("fbcdn")
-          );
-          if (withRange.length) {
-            url = withRange[withRange.length - 1]
-              .replace(/[&?](bytestart|byteend)=[^&]*/g, "")
-              .replace(/[?&]$/, "");
-          }
-        }
-      }
-
-      // ── Strategy 7: embed from current page URL ──
+      // ── Strategy H: embed from current page URL ──
       if (!url) {
         const postUrl = location.href.split("?")[0];
         const embed = await sendMsg({ type: "FETCH_EMBED_VIDEOS", postUrl });
@@ -687,7 +679,8 @@
       }
 
       if (!url) {
-        showStatus(btn, prev, "No video found", 2500);
+        // Last resort: ask the user to start the clip so we can capture its network URL
+        showStatus(btn, prev, "<span>재생 후 다시 시도</span>", 3000);
         return;
       }
 
@@ -757,6 +750,59 @@
     // No confident match — return "" so download() uses other strategies
     // (DO NOT fallback to allSsrVideoUrls[0] — that always returns the first video)
     return "";
+  }
+
+  // Strip DASH/MSE range params so the URL downloads the FULL file, not one byte range.
+  // Keep every other query param — they form the CDN signature (oh/oe/_nc_*) and the URL
+  // returns 403 without them.
+  function stripRange(u) {
+    return u.replace(/[&?](bytestart|byteend)=[^&]*/g, "").replace(/[?&]$/, "");
+  }
+
+  // Pick the best full (non-segment, non-range) CDN MP4 from captured {url, ts} entries.
+  // Prefers the most recently captured URL at or after `sinceTs` (0 = no time filter).
+  function pickFullMp4(entries, sinceTs) {
+    const cdn = (entries || []).filter(e =>
+      (e.url.includes("cdninstagram") || e.url.includes("fbcdn")) &&
+      !e.url.includes("-seg-") && !e.url.includes("/range/")
+    );
+    if (!cdn.length) return "";
+    const fresh = sinceTs ? cdn.filter(e => e.ts >= sinceTs) : cdn;
+    const pool = fresh.length ? fresh : cdn;
+    pool.sort((a, b) => b.ts - a.ts);
+    return stripRange(pool[0].url);
+  }
+
+  // Briefly start playback so Instagram fetches the progressive MP4 over the network,
+  // then read the captured CDN URL. Runs inside the button's click handler, so the
+  // play() call counts as a user gesture and is not blocked by autoplay policy.
+  // The element's prior paused/muted/time state is restored afterward.
+  async function capturePlayingUrl(video) {
+    if (!(video instanceof HTMLVideoElement)) return "";
+    const start = Date.now();
+    const wasPaused = video.paused;
+    const wasMuted = video.muted;
+    const at = video.currentTime;
+    try {
+      video.muted = true;
+      const p = video.play();
+      if (p && typeof p.then === "function") await p.catch(() => {});
+    } catch { /* play may reject — capture can still succeed from buffering */ }
+
+    let url = "";
+    for (let i = 0; i < 12 && !url; i++) {
+      await new Promise(r => setTimeout(r, 150));
+      const c = await sendMsg({ type: "GET_CAPTURED_URLS" });
+      url = pickFullMp4(c?.urlEntries || [], start - 500);
+    }
+
+    // Restore the player to how the user left it
+    try {
+      if (wasPaused) video.pause();
+      video.muted = wasMuted;
+      if (Number.isFinite(at) && Math.abs(video.currentTime - at) > 0.3) video.currentTime = at;
+    } catch {}
+    return url;
   }
 
   function getNonBlobSrc(video) {
