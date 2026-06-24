@@ -1,3 +1,5 @@
+> ⚠️ **이 repo는 보존용입니다.** 통합 후속작 → https://github.com/jeongpiano/media-downloader (Instagram + Threads + 전 웹 + 스트림 스니퍼)
+
 # Instagram Media Downloader v3
 
 Instagram에서 사진, 영상, Reels, Stories를 원클릭으로 다운로드하는 Chrome 확장프로그램.
